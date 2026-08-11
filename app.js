@@ -98,6 +98,36 @@ const seed = {
 // render() — así que no hay ventana real para pisar datos con el seed.
 let state = structuredClone(seed);
 
+/**
+ * Pedido HTTP con XMLHttpRequest en vez de fetch. Apps Script responde con
+ * un redirect interno (a script.googleusercontent.com) que fetch() no
+ * maneja bien para CORS — el navegador bloquea la respuesta aunque sea
+ * válida (se puede comprobar entrando a la URL directo en el navegador:
+ * ahí sí funciona, porque una navegación normal no pasa por el chequeo de
+ * CORS). XMLHttpRequest sí sigue ese redirect correctamente. Es una
+ * limitación conocida de Apps Script + fetch, no algo mal configurado.
+ */
+function xhrJson(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(options.method || "GET", url);
+    Object.entries(options.headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value));
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(`HTTP ${xhr.status}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText));
+      } catch {
+        reject(new Error("Respuesta no es JSON válido"));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Error de red"));
+    xhr.send(options.body || null);
+  });
+}
+
 // Todos los precios se expresan en una sola métrica: comisión % sobre la
 // venta s/IVA. Los que antes venían como "costo proveedor" se convierten acá
 // mismo: comisión% = (venta - costo) / venta * 100.
@@ -136,8 +166,7 @@ async function loadState() {
 
   try {
     const url = `${APPS_SCRIPT_URL}?token=${encodeURIComponent(APPS_SCRIPT_TOKEN)}`;
-    const res = await fetch(url);
-    const json = await res.json();
+    const json = await xhrJson(url);
     if (json.error) throw new Error(json.error);
     setSyncStatus("guardado", json.savedAt);
     return hydrate(json.data || cached);
@@ -204,7 +233,7 @@ function scheduleCloudSave() {
 async function pushCloudState() {
   setSyncStatus("guardando");
   try {
-    const res = await fetch(APPS_SCRIPT_URL, {
+    const json = await xhrJson(APPS_SCRIPT_URL, {
       method: "POST",
       // "text/plain" a propósito: evita el preflight CORS que Apps Script
       // no responde bien. Apps Script igual lee el body como texto y acá
@@ -212,7 +241,6 @@ async function pushCloudState() {
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({ token: APPS_SCRIPT_TOKEN, data: state })
     });
-    const json = await res.json();
     if (json.error) throw new Error(json.error);
     setSyncStatus("guardado", json.savedAt);
   } catch (err) {
