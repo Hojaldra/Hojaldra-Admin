@@ -99,32 +99,94 @@ const seed = {
 let state = structuredClone(seed);
 
 /**
- * Pedido HTTP con XMLHttpRequest en vez de fetch. Apps Script responde con
- * un redirect interno (a script.googleusercontent.com) que fetch() no
- * maneja bien para CORS — el navegador bloquea la respuesta aunque sea
- * válida (se puede comprobar entrando a la URL directo en el navegador:
- * ahí sí funciona, porque una navegación normal no pasa por el chequeo de
- * CORS). XMLHttpRequest sí sigue ese redirect correctamente. Es una
- * limitación conocida de Apps Script + fetch, no algo mal configurado.
+ * Pedido tipo JSONP: agrega un <script> al documento en vez de usar
+ * fetch/XHR. Nunca pasa por el chequeo de CORS (los <script src> jamás lo
+ * hicieron, por eso existía JSONP mucho antes de que existiera CORS), así
+ * que esquiva por completo la limitación de Apps Script.
  */
-function xhrJson(url, options = {}) {
+function jsonpRequest(url) {
   return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open(options.method || "GET", url);
-    Object.entries(options.headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value));
-    xhr.onload = () => {
-      if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new Error(`HTTP ${xhr.status}`));
-        return;
-      }
-      try {
-        resolve(JSON.parse(xhr.responseText));
-      } catch {
-        reject(new Error("Respuesta no es JSON válido"));
-      }
+    const callbackName = `hojaldraCb${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    const script = document.createElement("script");
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("timeout"));
+    }, 15000);
+
+    function cleanup() {
+      clearTimeout(timer);
+      delete window[callbackName];
+      script.remove();
+    }
+
+    window[callbackName] = (data) => {
+      cleanup();
+      resolve(data);
     };
-    xhr.onerror = () => reject(new Error("Error de red"));
-    xhr.send(options.body || null);
+    script.onerror = () => {
+      cleanup();
+      reject(new Error("No se pudo cargar el script"));
+    };
+    script.src = `${url}${url.includes("?") ? "&" : "?"}callback=${callbackName}`;
+    document.head.appendChild(script);
+  });
+}
+
+/**
+ * Pedido tipo formulario+iframe: un <form> normal enviado a un <iframe>
+ * oculto tampoco pasa por CORS (los formularios cross-origin están
+ * permitidos desde siempre; lo único que no se puede es LEER el
+ * documento resultante con JS, que es justo lo mismo que bloquea CORS
+ * para fetch/XHR). Por eso Code.gs responde con un mini <script> que usa
+ * postMessage para mandarnos el resultado — así sí lo podemos leer.
+ */
+function formPostRequest(url, fields) {
+  return new Promise((resolve, reject) => {
+    const frameName = `hojaldraFrame${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    const iframe = document.createElement("iframe");
+    iframe.name = frameName;
+    iframe.style.display = "none";
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("timeout"));
+    }, 15000);
+
+    function onMessage(event) {
+      let parsed;
+      try {
+        parsed = JSON.parse(event.data);
+      } catch {
+        return; // mensaje de otra cosa, no es el nuestro
+      }
+      cleanup();
+      resolve(parsed);
+    }
+
+    function cleanup() {
+      clearTimeout(timer);
+      window.removeEventListener("message", onMessage);
+      iframe.remove();
+      form.remove();
+    }
+
+    window.addEventListener("message", onMessage);
+
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = url;
+    form.target = frameName;
+    form.style.display = "none";
+    Object.entries(fields).forEach(([key, value]) => {
+      const input = document.createElement("input");
+      input.name = key;
+      input.value = value;
+      form.appendChild(input);
+    });
+
+    document.body.appendChild(iframe);
+    document.body.appendChild(form);
+    form.submit();
   });
 }
 
@@ -166,7 +228,7 @@ async function loadState() {
 
   try {
     const url = `${APPS_SCRIPT_URL}?token=${encodeURIComponent(APPS_SCRIPT_TOKEN)}`;
-    const json = await xhrJson(url);
+    const json = await jsonpRequest(url);
     if (json.error) throw new Error(json.error);
     setSyncStatus("guardado", json.savedAt);
     return hydrate(json.data || cached);
@@ -233,13 +295,9 @@ function scheduleCloudSave() {
 async function pushCloudState() {
   setSyncStatus("guardando");
   try {
-    const json = await xhrJson(APPS_SCRIPT_URL, {
-      method: "POST",
-      // "text/plain" a propósito: evita el preflight CORS que Apps Script
-      // no responde bien. Apps Script igual lee el body como texto y acá
-      // lo parseamos como JSON nosotros mismos (ver Code.gs).
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ token: APPS_SCRIPT_TOKEN, data: state })
+    const json = await formPostRequest(APPS_SCRIPT_URL, {
+      token: APPS_SCRIPT_TOKEN,
+      data: JSON.stringify(state)
     });
     if (json.error) throw new Error(json.error);
     setSyncStatus("guardado", json.savedAt);
