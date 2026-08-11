@@ -127,67 +127,49 @@ function jsonpRequest(url) {
       cleanup();
       reject(new Error("No se pudo cargar el script"));
     };
-    script.src = `${url}${url.includes("?") ? "&" : "?"}callback=${callbackName}`;
+    script.src = `${url}${url.includes("?") ? "&" : "?"}callback=${callbackName}&nocache=${Date.now()}`;
     document.head.appendChild(script);
   });
 }
 
 /**
- * Pedido tipo formulario+iframe: un <form> normal enviado a un <iframe>
- * oculto tampoco pasa por CORS (los formularios cross-origin están
- * permitidos desde siempre; lo único que no se puede es LEER el
- * documento resultante con JS, que es justo lo mismo que bloquea CORS
- * para fetch/XHR). Por eso Code.gs responde con un mini <script> que usa
- * postMessage para mandarnos el resultado — así sí lo podemos leer.
+ * Manda el formulario a un iframe oculto y NO espera respuesta por
+ * postMessage — Google le pone X-Frame-Options: SAMEORIGIN a esa página,
+ * así que el navegador ni siquiera deja que el iframe la muestre, y el
+ * mensaje nunca llega. Es una restricción del lado de Google, no algo que
+ * podamos resolver desde acá. El guardado en sí SÍ llega igual (el
+ * formulario se manda igual, solo que a ciegas) — la confirmación se hace
+ * aparte, releyendo el dato después.
  */
-function formPostRequest(url, fields) {
-  return new Promise((resolve, reject) => {
-    const frameName = `hojaldraFrame${Date.now()}${Math.floor(Math.random() * 1e6)}`;
-    const iframe = document.createElement("iframe");
-    iframe.name = frameName;
-    iframe.style.display = "none";
+function submitHiddenForm(url, fields) {
+  const frameName = `hojaldraFrame${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+  const iframe = document.createElement("iframe");
+  iframe.name = frameName;
+  iframe.style.display = "none";
 
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error("timeout"));
-    }, 15000);
-
-    function onMessage(event) {
-      let parsed;
-      try {
-        parsed = JSON.parse(event.data);
-      } catch {
-        return; // mensaje de otra cosa, no es el nuestro
-      }
-      cleanup();
-      resolve(parsed);
-    }
-
-    function cleanup() {
-      clearTimeout(timer);
-      window.removeEventListener("message", onMessage);
-      iframe.remove();
-      form.remove();
-    }
-
-    window.addEventListener("message", onMessage);
-
-    const form = document.createElement("form");
-    form.method = "POST";
-    form.action = url;
-    form.target = frameName;
-    form.style.display = "none";
-    Object.entries(fields).forEach(([key, value]) => {
-      const input = document.createElement("input");
-      input.name = key;
-      input.value = value;
-      form.appendChild(input);
-    });
-
-    document.body.appendChild(iframe);
-    document.body.appendChild(form);
-    form.submit();
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = url;
+  form.target = frameName;
+  form.style.display = "none";
+  Object.entries(fields).forEach(([key, value]) => {
+    const input = document.createElement("input");
+    input.name = key;
+    input.value = value;
+    form.appendChild(input);
   });
+
+  document.body.appendChild(iframe);
+  document.body.appendChild(form);
+  form.submit();
+  setTimeout(() => {
+    iframe.remove();
+    form.remove();
+  }, 5000);
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // Todos los precios se expresan en una sola métrica: comisión % sobre la
@@ -295,14 +277,19 @@ function scheduleCloudSave() {
 async function pushCloudState() {
   setSyncStatus("guardando");
   try {
-    const json = await formPostRequest(APPS_SCRIPT_URL, {
+    submitHiddenForm(APPS_SCRIPT_URL, {
       token: APPS_SCRIPT_TOKEN,
       data: JSON.stringify(state)
     });
+    // Sin confirmación directa posible (ver submitHiddenForm) — le damos
+    // un instante a Apps Script para procesar y confirmamos releyendo.
+    await wait(1200);
+    const url = `${APPS_SCRIPT_URL}?token=${encodeURIComponent(APPS_SCRIPT_TOKEN)}`;
+    const json = await jsonpRequest(url);
     if (json.error) throw new Error(json.error);
     setSyncStatus("guardado", json.savedAt);
   } catch (err) {
-    console.error("No se pudo guardar en la nube (queda en localStorage, se reintenta):", err);
+    console.error("No se pudo confirmar el guardado en la nube (probablemente igual se guardó, revisar la Sheet):", err);
     setSyncStatus("error");
   }
 }
