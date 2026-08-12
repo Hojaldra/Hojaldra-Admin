@@ -375,6 +375,15 @@ function periodLabelFor(clientId, dateText) {
   return `Semana ${periodKeyFor(clientId, dateText)} (${fmtDDMM(start)} - ${fmtDDMM(end)})`;
 }
 
+/** Version corta de periodLabelFor para columnas angostas (ej. el picker de remitos a facturar). */
+function weekShortLabel(clientId, dateText) {
+  const client = byId(state.clients, clientId);
+  if (!client) return "";
+  if (client.billingCycle === "monthly") return dateText.slice(0, 7);
+  if (client.billingCycle === "po") return "OC";
+  return `Sem. ${periodKeyFor(clientId, dateText)}`;
+}
+
 function activeFilters() {
   return {
     month: $("#monthFilter").value,
@@ -1171,14 +1180,22 @@ toggleWeekStartDayField();
  * Se recalcula cada vez que cambia cliente/sala/proveedor, o cuando se
  * tilda/destilda un remito puntual.
  */
+/** Recorta una lista de remitos candidatos a los de una semana puntual (si se cargó el filtro). */
+function filterByWeek(candidates, weekFilter) {
+  if (weekFilter === undefined || weekFilter === "") return candidates;
+  return candidates.filter((item) => periodKeyFor(item.clientId, item.date) === String(weekFilter));
+}
+
 function renderInvoicePickers() {
   renderPicker({
     containerSelector: "#clientInvoicePicker",
     totalSelector: "#clientInvoiceTotal",
     form: $("#clientInvoiceForm"),
-    getCandidates: (data) => data.clientId && data.locationId
-      ? candidateDeliveries({ clientId: data.clientId, locationId: data.locationId, mode: "client" })
-      : [],
+    getCandidates: (data) => {
+      if (!data.clientId || !data.locationId) return [];
+      const candidates = candidateDeliveries({ clientId: data.clientId, locationId: data.locationId, mode: "client" });
+      return filterByWeek(candidates, data.weekFilter);
+    },
     valueFn: (t) => t.saleNet,
     emptyMessage: "No hay remitos pendientes de facturar para esta sala."
   });
@@ -1187,9 +1204,11 @@ function renderInvoicePickers() {
     containerSelector: "#providerInvoicePicker",
     totalSelector: "#providerInvoiceTotal",
     form: $("#providerInvoiceForm"),
-    getCandidates: (data) => data.clientId && data.locationId && data.providerId
-      ? candidateDeliveries({ clientId: data.clientId, locationId: data.locationId, providerId: data.providerId, mode: "provider" })
-      : [],
+    getCandidates: (data) => {
+      if (!data.clientId || !data.locationId || !data.providerId) return [];
+      const candidates = candidateDeliveries({ clientId: data.clientId, locationId: data.locationId, providerId: data.providerId, mode: "provider" });
+      return filterByWeek(candidates, data.weekFilter);
+    },
     valueFn: (t) => t.providerNet,
     emptyMessage: "No hay remitos listos para este proveedor todavía — recordá que primero tiene que estar cobrada la factura del cliente."
   });
@@ -1207,18 +1226,16 @@ function renderPicker({ containerSelector, totalSelector, form, getCandidates, v
   }
 
   container.innerHTML = `<table class="picker-table">
-    <thead><tr><th></th><th>Fecha</th><th>Semana</th><th>Remito</th><th>Sala</th><th>Producto</th><th class="num">Cant.</th><th class="num">Monto</th></tr></thead>
+    <thead><tr><th></th><th>Fecha</th><th>Semana</th><th>Remito</th><th>Producto</th><th class="num">Cant.</th><th class="num">Monto</th></tr></thead>
     <tbody>
       ${candidates.map((item) => {
         const t = totalsFor(item);
-        const loc = byId(state.locations, item.locationId)?.name || "";
         const product = byId(state.products, item.productId)?.name || "";
         return `<tr>
           <td><input type="checkbox" class="picker-check" data-picker-id="${item.id}" checked /></td>
           <td>${item.date}</td>
-          <td>${escapeHtml(periodLabelFor(item.clientId, item.date))}</td>
+          <td title="${escapeHtml(periodLabelFor(item.clientId, item.date))}">${escapeHtml(weekShortLabel(item.clientId, item.date))}</td>
           <td>${escapeHtml(item.receiptNo)}</td>
-          <td>${escapeHtml(loc)}</td>
           <td>${escapeHtml(product)}</td>
           <td class="num">${Number(item.quantity).toLocaleString("es-AR")}</td>
           <td class="num">${money(valueFn(t) * (1 + IVA_RATE))}</td>
@@ -1250,6 +1267,7 @@ function renderPicker({ containerSelector, totalSelector, form, getCandidates, v
   ["clientId", "locationId", "providerId"].forEach((field) => {
     form.elements[field]?.addEventListener("change", renderInvoicePickers);
   });
+  form.elements.weekFilter?.addEventListener("input", renderInvoicePickers);
 });
 
 /** Chequeo de duplicados: mismo proveedor + N de remito + sala + producto ya cargado. */

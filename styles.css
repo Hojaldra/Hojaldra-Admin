@@ -328,7 +328,7 @@ li {
 }
 
 .invoice-grid {
-  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  grid-template-columns: 1fr;
 }
 
 .invoice-grid form {
@@ -342,6 +342,10 @@ li {
 }
 
 .invoice-grid h2 {
+  grid-column: 1 / -1;
+}
+
+.invoice-grid .wide {
   grid-column: 1 / -1;
 }
 

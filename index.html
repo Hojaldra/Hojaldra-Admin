@@ -245,6 +245,7 @@
             <h2>Factura a cliente</h2>
             <label>Cliente<select name="clientId" required></select></label>
             <label>Sala<select name="locationId" required></select></label>
+            <label>Semana<input name="weekFilter" type="number" min="1" max="53" placeholder="Todas" /></label>
             <label>N Factura<input name="number" required /></label>
             <label>Emision<input name="issueDate" type="date" required /></label>
             <label class="wide">Remitos a incluir (tildá los que corresponden)
@@ -266,6 +267,7 @@
             <label>Cliente<select name="clientId" required></select></label>
             <label>Sala<select name="locationId" required></select></label>
             <label>Proveedor<select name="providerId" required></select></label>
+            <label>Semana<input name="weekFilter" type="number" min="1" max="53" placeholder="Todas" /></label>
             <label>N Factura<input name="number" required /></label>
             <label>Recepcion<input name="issueDate" type="date" required /></label>
             <label class="wide">Remitos listos para facturar (ya cobrados al cliente)
