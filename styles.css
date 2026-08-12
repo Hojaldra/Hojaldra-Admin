@@ -100,6 +100,22 @@ h2 {
   flex-wrap: wrap;
 }
 
+.merge-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  text-transform: none;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.merge-toggle input {
+  width: auto;
+  min-height: auto;
+}
+
 main {
   padding: 22px 28px 36px;
   display: grid;
@@ -244,6 +260,24 @@ th {
   font-size: 12px;
   text-transform: uppercase;
   z-index: 1;
+}
+
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+th.sortable:hover {
+  color: var(--green);
+}
+
+th.sortable .sort-arrow {
+  margin-left: 4px;
+  opacity: 0.5;
+}
+
+th.sortable.sort-active .sort-arrow {
+  opacity: 1;
 }
 
 td.num,
@@ -413,6 +447,11 @@ li {
   padding: 3px 8px;
   font-size: 12px;
   flex-shrink: 0;
+}
+
+.edit-btn.danger {
+  color: var(--red);
+  border-color: var(--red);
 }
 
 .cancel-edit-btn {

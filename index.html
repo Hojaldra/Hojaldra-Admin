@@ -15,6 +15,10 @@
       <div class="top-actions">
         <span id="syncStatus" class="sync-status status-cargando">Cargando...</span>
         <button id="exportBtn" type="button" title="Exportar datos">Exportar</button>
+        <label class="merge-toggle" title="Si está tildado, lo importado se suma a lo que ya tenés. Si lo destildás, borra todo y lo reemplaza.">
+          <input id="importMergeMode" type="checkbox" checked />
+          Fusionar (no borrar)
+        </label>
         <label class="file-btn" title="Importar datos">
           Importar
           <input id="importFile" type="file" accept="application/json" />
@@ -134,14 +138,14 @@
           <table>
             <thead>
               <tr>
-                <th>Cliente</th>
-                <th>Sala</th>
-                <th>Proveedor</th>
-                <th>Producto</th>
-                <th>Venta s/IVA</th>
-                <th>Comision</th>
-                <th>Costo equivalente</th>
-                <th>Desde</th>
+                <th data-sort="client" class="sortable">Cliente</th>
+                <th data-sort="location" class="sortable">Sala</th>
+                <th data-sort="provider" class="sortable">Proveedor</th>
+                <th data-sort="product" class="sortable">Producto</th>
+                <th data-sort="salePrice" class="sortable num">Venta s/IVA</th>
+                <th data-sort="commissionPct" class="sortable num">Comision</th>
+                <th data-sort="cost" class="sortable num">Costo equivalente</th>
+                <th data-sort="validFrom" class="sortable">Desde</th>
                 <th></th>
               </tr>
             </thead>

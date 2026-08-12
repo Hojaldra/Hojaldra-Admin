@@ -620,8 +620,37 @@ function retIvaForDeliveries(rows) {
   }, 0);
 }
 
+// Estado del orden actual de la tabla de Precios. Por defecto: Cliente,
+// despues Sala, despues Producto -- asi arranca ya agrupado de forma util.
+let ruleSort = { key: "client", dir: "asc" };
+
+function ruleSortValue(item, key) {
+  if (key === "client") return byId(state.clients, item.clientId)?.name || "";
+  if (key === "location") return byId(state.locations, item.locationId)?.name || "";
+  if (key === "provider") return byId(state.providers, item.providerId)?.name || "";
+  if (key === "product") return byId(state.products, item.productId)?.name || "";
+  if (key === "salePrice") return Number(item.salePrice) || 0;
+  if (key === "commissionPct") return Number(item.commissionPct) || 0;
+  if (key === "cost") return item.salePrice * (1 - Number(item.commissionPct || 0) / 100);
+  if (key === "validFrom") return item.validFrom || "";
+  return "";
+}
+
 function renderRules() {
-  $("#ruleRows").innerHTML = state.priceRules.map((item) => {
+  const sorted = [...state.priceRules].sort((a, b) => {
+    const va = ruleSortValue(a, ruleSort.key);
+    const vb = ruleSortValue(b, ruleSort.key);
+    const cmp = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb));
+    return ruleSort.dir === "asc" ? cmp : -cmp;
+  });
+
+  document.querySelectorAll("#rules th.sortable").forEach((th) => {
+    th.classList.toggle("sort-active", th.dataset.sort === ruleSort.key);
+    const arrow = th.dataset.sort === ruleSort.key ? (ruleSort.dir === "asc" ? "▲" : "▼") : "▲";
+    th.innerHTML = `${th.textContent.replace(/[▲▼]/g, "").trim()} <span class="sort-arrow">${arrow}</span>`;
+  });
+
+  $("#ruleRows").innerHTML = sorted.map((item) => {
     const client = byId(state.clients, item.clientId)?.name || "";
     const loc = byId(state.locations, item.locationId)?.name || "";
     const provider = byId(state.providers, item.providerId)?.name || "";
@@ -640,19 +669,73 @@ function renderRules() {
   }).join("");
 }
 
+document.querySelectorAll("#rules th.sortable").forEach((th) => {
+  th.addEventListener("click", () => {
+    if (ruleSort.key === th.dataset.sort) {
+      ruleSort.dir = ruleSort.dir === "asc" ? "desc" : "asc";
+    } else {
+      ruleSort = { key: th.dataset.sort, dir: "asc" };
+    }
+    renderRules();
+  });
+});
+
 function renderCatalogs() {
   $("#providerList").innerHTML = state.providers.map((item) =>
-    `<li>${escapeHtml(item.name)} <button type="button" class="edit-btn" data-edit-provider="${item.id}">Editar</button></li>`
+    `<li><span>${escapeHtml(item.name)}</span><span><button type="button" class="edit-btn" data-edit-provider="${item.id}">Editar</button> <button type="button" class="edit-btn danger" data-delete-provider="${item.id}">Borrar</button></span></li>`
   ).join("");
   $("#clientList").innerHTML = state.clients.map((item) =>
-    `<li>${escapeHtml(item.name)} - ${cycleLabel(item.billingCycle)}${item.billingCycle === "weekly" ? ` (arranca ${dayLabel(item.weekStartDay)})` : ""} <button type="button" class="edit-btn" data-edit-client="${item.id}">Editar</button></li>`
+    `<li><span>${escapeHtml(item.name)} - ${cycleLabel(item.billingCycle)}${item.billingCycle === "weekly" ? ` (arranca ${dayLabel(item.weekStartDay)})` : ""}</span><span><button type="button" class="edit-btn" data-edit-client="${item.id}">Editar</button> <button type="button" class="edit-btn danger" data-delete-client="${item.id}">Borrar</button></span></li>`
   ).join("");
   $("#locationList").innerHTML = state.locations.map((item) =>
-    `<li>${escapeHtml(item.name)} - ${escapeHtml(byId(state.clients, item.clientId)?.name || "")} <button type="button" class="edit-btn" data-edit-location="${item.id}">Editar</button></li>`
+    `<li><span>${escapeHtml(item.name)} - ${escapeHtml(byId(state.clients, item.clientId)?.name || "")}</span><span><button type="button" class="edit-btn" data-edit-location="${item.id}">Editar</button> <button type="button" class="edit-btn danger" data-delete-location="${item.id}">Borrar</button></span></li>`
   ).join("");
   $("#productList").innerHTML = state.products.map((item) =>
-    `<li>${escapeHtml(item.name)} - ${escapeHtml(item.unit)} <button type="button" class="edit-btn" data-edit-product="${item.id}">Editar</button></li>`
+    `<li><span>${escapeHtml(item.name)} - ${escapeHtml(item.unit)}</span><span><button type="button" class="edit-btn" data-edit-product="${item.id}">Editar</button> <button type="button" class="edit-btn danger" data-delete-product="${item.id}">Borrar</button></span></li>`
   ).join("");
+}
+
+/**
+ * Chequea si un registro de catálogo todavía está referenciado en algún
+ * lado antes de dejarlo borrar. Devuelve un array de strings con lo que
+ * lo está bloqueando (vacío = se puede borrar tranquilo).
+ */
+function catalogReferences(type, id) {
+  const blockers = [];
+  const count = (arr, label) => { if (arr.length) blockers.push(`${arr.length} ${label}`); };
+
+  if (type === "client") {
+    count(state.locations.filter((l) => l.clientId === id), "sala(s)");
+    count(state.deliveries.filter((d) => d.clientId === id), "remito(s)");
+    count(state.priceRules.filter((r) => r.clientId === id), "regla(s) de precio");
+    count(state.invoices.filter((i) => i.clientId === id), "factura(s)");
+  }
+  if (type === "provider") {
+    count(state.deliveries.filter((d) => d.providerId === id), "remito(s)");
+    count(state.priceRules.filter((r) => r.providerId === id), "regla(s) de precio");
+    count(state.invoices.filter((i) => i.type === "provider" && i.providerId === id), "factura(s)");
+  }
+  if (type === "location") {
+    count(state.deliveries.filter((d) => d.locationId === id), "remito(s)");
+    count(state.priceRules.filter((r) => r.locationId === id), "regla(s) de precio");
+    count(state.invoices.filter((i) => i.locationId === id), "factura(s)");
+  }
+  if (type === "product") {
+    count(state.deliveries.filter((d) => d.productId === id), "remito(s)");
+    count(state.priceRules.filter((r) => r.productId === id), "regla(s) de precio");
+  }
+  return blockers;
+}
+
+function tryDeleteCatalogItem(type, id, collectionName, label) {
+  const blockers = catalogReferences(type, id);
+  if (blockers.length) {
+    alert(`No se puede borrar "${label}" — todavía está referenciado por: ${blockers.join(", ")}.\n\nPrimero corregí o borrá esas referencias (por ejemplo, reasigná esas salas/remitos/reglas a otro cliente) y volvé a intentar.`);
+    return;
+  }
+  if (!confirm(`¿Borrar "${label}" definitivamente? No tiene nada vinculado, así que es seguro.`)) return;
+  state[collectionName] = state[collectionName].filter((item) => item.id !== id);
+  render();
 }
 
 function deliveryStatusLabel(status) {
@@ -1396,6 +1479,29 @@ addOrEditFromForm($("#productForm"), "products", (v, editingId) => ({
 }), "Agregar producto");
 
 document.body.addEventListener("click", (event) => {
+  const deleteProviderId = event.target.dataset?.deleteProvider;
+  const deleteClientId = event.target.dataset?.deleteClient;
+  const deleteLocationId = event.target.dataset?.deleteLocation;
+  const deleteProductId = event.target.dataset?.deleteProduct;
+  if (deleteProviderId) {
+    const item = byId(state.providers, deleteProviderId);
+    tryDeleteCatalogItem("provider", deleteProviderId, "providers", item?.name || deleteProviderId);
+  }
+  if (deleteClientId) {
+    const item = byId(state.clients, deleteClientId);
+    tryDeleteCatalogItem("client", deleteClientId, "clients", item?.name || deleteClientId);
+  }
+  if (deleteLocationId) {
+    const item = byId(state.locations, deleteLocationId);
+    tryDeleteCatalogItem("location", deleteLocationId, "locations", item?.name || deleteLocationId);
+  }
+  if (deleteProductId) {
+    const item = byId(state.products, deleteProductId);
+    tryDeleteCatalogItem("product", deleteProductId, "products", item?.name || deleteProductId);
+  }
+});
+
+document.body.addEventListener("click", (event) => {
   const providerId = event.target.dataset?.editProvider;
   const clientId = event.target.dataset?.editClient;
   const locationId = event.target.dataset?.editLocation;
@@ -1541,11 +1647,98 @@ $("#exportBtn").addEventListener("click", () => {
   URL.revokeObjectURL(url);
 });
 
+/**
+ * Fusiona un JSON importado con lo que ya está cargado, EN VEZ de
+ * reemplazar todo. Pensado para subir los masters sala por sala sin
+ * pisar lo anterior.
+ *  - Catálogos (proveedores/clientes/salas/productos): si el id ya
+ *    existe, se deja el que ya estaba (no se pisa) — así no rompe
+ *    referencias existentes con datos distintos. Si es nuevo, se agrega.
+ *  - Reglas de precio: se evita agregar una regla EXACTAMENTE igual
+ *    (mismo cliente+sala+proveedor+producto+vigencia) dos veces.
+ *  - Remitos: mismo criterio que ya usa la carga manual (proveedor +
+ *    N remito + sala + producto) para no duplicar el mismo remito.
+ *  - Facturas y gastos: se agregan por id (los ids son únicos random,
+ *    solo chocarían si se importa el mismo archivo dos veces).
+ * Devuelve un resumen de cuántos remitos se saltearon por duplicados.
+ */
+function mergeState(imported) {
+  const summary = { addedDeliveries: 0, skippedDeliveries: 0, addedRules: 0, skippedRules: 0 };
+
+  ["providers", "clients", "locations", "products"].forEach((key) => {
+    const existingIds = new Set(state[key].map((item) => item.id));
+    (imported[key] || []).forEach((item) => {
+      if (!existingIds.has(item.id)) {
+        state[key].push(item);
+        existingIds.add(item.id);
+      }
+    });
+  });
+
+  const ruleKey = (r) => `${r.clientId}|${r.locationId}|${r.providerId}|${r.productId}|${r.validFrom}`;
+  const existingRuleKeys = new Set(state.priceRules.map(ruleKey));
+  (imported.priceRules || []).forEach((r) => {
+    const key = ruleKey(r);
+    if (!existingRuleKeys.has(key)) {
+      state.priceRules.push(r);
+      existingRuleKeys.add(key);
+      summary.addedRules++;
+    } else {
+      summary.skippedRules++;
+    }
+  });
+
+  const delivKey = (d) => `${d.providerId}|${String(d.receiptNo).trim().toLowerCase()}|${d.locationId}|${d.productId}`;
+  const existingDelivKeys = new Set(state.deliveries.map(delivKey));
+  (imported.deliveries || []).forEach((d) => {
+    const key = delivKey(d);
+    if (!existingDelivKeys.has(key)) {
+      state.deliveries.push(d);
+      existingDelivKeys.add(key);
+      summary.addedDeliveries++;
+    } else {
+      summary.skippedDeliveries++;
+    }
+  });
+
+  const existingInvoiceIds = new Set(state.invoices.map((i) => i.id));
+  (imported.invoices || []).forEach((inv) => {
+    if (!existingInvoiceIds.has(inv.id)) {
+      state.invoices.push(inv);
+      existingInvoiceIds.add(inv.id);
+    }
+  });
+
+  const existingExpenseIds = new Set(state.expenses.map((e) => e.id));
+  (imported.expenses || []).forEach((e) => {
+    if (!existingExpenseIds.has(e.id)) {
+      state.expenses.push(e);
+      existingExpenseIds.add(e.id);
+    }
+  });
+
+  return summary;
+}
+
 $("#importFile").addEventListener("change", async (event) => {
   const file = event.target.files[0];
   if (!file) return;
-  state = JSON.parse(await file.text());
-  render();
+  const imported = JSON.parse(await file.text());
+  const mergeMode = $("#importMergeMode").checked;
+
+  if (mergeMode) {
+    const summary = mergeState(imported);
+    render();
+    alert(`Fusión completa.\n\nRemitos agregados: ${summary.addedDeliveries}${summary.skippedDeliveries ? ` (se saltearon ${summary.skippedDeliveries} por estar duplicados)` : ""}\nReglas de precio agregadas: ${summary.addedRules}${summary.skippedRules ? ` (se saltearon ${summary.skippedRules} por estar duplicadas)` : ""}`);
+  } else {
+    if (!confirm("Esto va a BORRAR todos los datos actuales y reemplazarlos por el archivo importado. ¿Seguro que querés reemplazar en vez de fusionar?")) {
+      event.target.value = "";
+      return;
+    }
+    state = imported;
+    render();
+  }
+  event.target.value = "";
 });
 
 function slug(value) {
