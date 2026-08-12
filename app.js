@@ -1152,7 +1152,7 @@ function renderPicker({ containerSelector, totalSelector, form, getCandidates, v
   }
 
   container.innerHTML = `<table class="picker-table">
-    <thead><tr><th></th><th>Fecha</th><th>Remito</th><th>Sala</th><th>Producto</th><th class="num">Cant.</th><th class="num">Monto</th></tr></thead>
+    <thead><tr><th></th><th>Fecha</th><th>Semana</th><th>Remito</th><th>Sala</th><th>Producto</th><th class="num">Cant.</th><th class="num">Monto</th></tr></thead>
     <tbody>
       ${candidates.map((item) => {
         const t = totalsFor(item);
@@ -1161,6 +1161,7 @@ function renderPicker({ containerSelector, totalSelector, form, getCandidates, v
         return `<tr>
           <td><input type="checkbox" class="picker-check" data-picker-id="${item.id}" checked /></td>
           <td>${item.date}</td>
+          <td>${escapeHtml(periodLabelFor(item.clientId, item.date))}</td>
           <td>${escapeHtml(item.receiptNo)}</td>
           <td>${escapeHtml(loc)}</td>
           <td>${escapeHtml(product)}</td>

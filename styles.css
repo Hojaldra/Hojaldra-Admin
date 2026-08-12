@@ -353,7 +353,7 @@ output {
 }
 
 .picker {
-  max-height: 220px;
+  max-height: 480px;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 6px;
