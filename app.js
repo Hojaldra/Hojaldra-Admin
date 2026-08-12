@@ -585,13 +585,30 @@ function renderDeliveries() {
   $("#kpiIva").textContent = money(totals.profitNet * IVA_RATE - retIvaForDeliveries(rows));
 }
 
-/** Retenciones de IVA ya confirmadas (facturas de cliente PAGO) que tocan a estos remitos. */
+/**
+ * Retenciones de IVA ya confirmadas (facturas de cliente PAGO) que tocan a
+ * estos remitos, PRORRATEADAS. Si una factura junta remitos de más de un
+ * período (ej. junio y julio en una sola factura), no restamos la
+ * retención completa apenas aparezca un remito de esa factura — restamos
+ * solo la porción de la retención que corresponde a la venta de ESTE
+ * período, según qué parte del monto total de la factura cae en `rows`.
+ * Evita restar de más (o duplicar la resta) al mirar distintos meses/semanas.
+ */
 function retIvaForDeliveries(rows) {
-  const ids = new Set(rows.map((r) => r.id));
-  const relevant = state.invoices.filter((inv) =>
-    inv.type === "client" && inv.status === "PAGO" && (inv.deliveryIds || []).some((id) => ids.has(id))
+  const idsInView = new Set(rows.map((r) => r.id));
+  const relevantInvoices = state.invoices.filter((inv) =>
+    inv.type === "client" && inv.status === "PAGO" && (inv.deliveryIds || []).some((id) => idsInView.has(id))
   );
-  return relevant.reduce((sum, inv) => sum + Number(inv.retIva || 0), 0);
+  return relevantInvoices.reduce((sum, inv) => {
+    const invDeliveries = (inv.deliveryIds || []).map((id) => byId(state.deliveries, id)).filter(Boolean);
+    const invTotalSale = invDeliveries.reduce((s, d) => s + totalsFor(d).saleNet, 0);
+    if (invTotalSale <= 0) return sum;
+    const inViewSale = invDeliveries
+      .filter((d) => idsInView.has(d.id))
+      .reduce((s, d) => s + totalsFor(d).saleNet, 0);
+    const fraction = inViewSale / invTotalSale;
+    return sum + Number(inv.retIva || 0) * fraction;
+  }, 0);
 }
 
 function renderRules() {
@@ -641,9 +658,35 @@ function renderReports() {
   const rows = filteredDeliveries();
   renderSalaWeekRows(rows);
   $("#reportGridFilterLabel").textContent = "Mostrando: " + activeFiltersLabel();
-  renderGroup("#receivableRows", rows, (item) => byId(state.clients, item.clientId)?.name || "", (t) => t.saleNet * (1 + IVA_RATE));
+  renderReceivables(rows);
   renderProviderPayables(rows);
   renderGroup("#profitRows", rows, (item) => byId(state.locations, item.locationId)?.name || "", (t) => t.profitNet);
+}
+
+/**
+ * "Pendiente de cobro" = remitos cuyo estado todavía es PENDIENTE o
+ * FACTURADO (la sala todavía no pagó). Una vez que pasa a COBRADO,
+ * PROV_PENDIENTE o PAGO, el cliente ya pagó su factura.
+ */
+function renderReceivables(rows) {
+  const map = new Map();
+  rows.forEach((item) => {
+    const clientName = byId(state.clients, item.clientId)?.name || "";
+    const current = map.get(item.clientId) || { name: clientName, total: 0, pending: 0 };
+    const gross = totalsFor(item).saleNet * (1 + IVA_RATE);
+    current.total += gross;
+    const status = deliveryStatus(item.id);
+    if (status === "PENDIENTE" || status === "FACTURADO") current.pending += gross;
+    map.set(item.clientId, current);
+  });
+  const grouped = [...map.values()].sort((a, b) => b.total - a.total);
+  const total = grouped.reduce((sum, item) => sum + item.total, 0);
+  const totalPending = grouped.reduce((sum, item) => sum + item.pending, 0);
+  $("#receivableRows").innerHTML = grouped.length
+    ? `<tr><th>Cliente</th><th class="num">Devengado total</th><th class="num">Pendiente de cobro</th></tr>
+      ${grouped.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td class="num">${money(item.total)}</td><td class="num">${money(item.pending)}</td></tr>`).join("")}
+      <tr><th>Total clientes</th><th class="num">${money(total)}</th><th class="num">${money(totalPending)}</th></tr>`
+    : `<tr><td class="empty">Sin datos.</td></tr>`;
 }
 
 /** Texto legible de qué filtros del toolbar de arriba están afectando estos 3 resúmenes. */
@@ -956,22 +999,34 @@ $("#openingBalance").addEventListener("input", (event) => {
   renderMonthlyTable();
 });
 
+/**
+ * "Pendiente de pago" = remitos cuyo estado todavía no es PAGO — incluye
+ * los que ni siquiera están habilitados para pagarle al proveedor todavía
+ * (falta que la sala pague primero). Es "lo que en algún momento le vamos
+ * a tener que pagar a este proveedor y todavía no le pagamos", no
+ * necesariamente "lo que hay que pagar ya mismo" (para eso está la
+ * columna "Estado / reclamo" de la tabla de arriba, que sí distingue caso
+ * por caso).
+ */
 function renderProviderPayables(rows) {
   const map = new Map();
   rows.forEach((item) => {
     const provider = byId(state.providers, item.providerId)?.name || "";
     const period = periodLabelFor(item.clientId, item.date);
     const key = `${item.providerId}|${period}`;
-    const current = map.get(key) || { provider, period, providerGross: 0 };
-    current.providerGross += totalsFor(item).providerNet * (1 + IVA_RATE);
+    const current = map.get(key) || { provider, period, total: 0, pending: 0 };
+    const gross = totalsFor(item).providerNet * (1 + IVA_RATE);
+    current.total += gross;
+    if (deliveryStatus(item.id) !== "PAGO") current.pending += gross;
     map.set(key, current);
   });
   const grouped = [...map.values()].sort((a, b) => a.provider.localeCompare(b.provider));
-  const total = grouped.reduce((sum, item) => sum + item.providerGross, 0);
+  const total = grouped.reduce((sum, item) => sum + item.total, 0);
+  const totalPending = grouped.reduce((sum, item) => sum + item.pending, 0);
   $("#payableRows").innerHTML = grouped.length
-    ? `<tr><th>Proveedor</th><th>Periodo</th><th class="num">A pagar c/IVA</th></tr>
-      ${grouped.map((item) => `<tr><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.period)}</td><td class="num">${money(item.providerGross)}</td></tr>`).join("")}
-      <tr><th colspan="2">Total proveedores</th><th class="num">${money(total)}</th></tr>`
+    ? `<tr><th>Proveedor</th><th>Periodo</th><th class="num">Devengado c/IVA</th><th class="num">Pendiente de pago</th></tr>
+      ${grouped.map((item) => `<tr><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.period)}</td><td class="num">${money(item.total)}</td><td class="num">${money(item.pending)}</td></tr>`).join("")}
+      <tr><th colspan="2">Total proveedores</th><th class="num">${money(total)}</th><th class="num">${money(totalPending)}</th></tr>`
     : `<tr><td class="empty">Sin datos.</td></tr>`;
 }
 
@@ -1457,12 +1512,6 @@ $("#importFile").addEventListener("change", async (event) => {
   const file = event.target.files[0];
   if (!file) return;
   state = JSON.parse(await file.text());
-  render();
-});
-
-$("#resetBtn").addEventListener("click", () => {
-  if (!confirm("Restaurar datos demo?")) return;
-  state = structuredClone(seed);
   render();
 });
 
