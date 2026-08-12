@@ -1255,7 +1255,22 @@ function renderPicker({ containerSelector, totalSelector, form, getCandidates, v
   };
   container.querySelectorAll(".picker-check").forEach((el) => el.addEventListener("change", recompute));
   recompute();
+  container._recompute = recompute;
 }
+
+/** Marcar/Desmarcar todos los remitos visibles en un picker de un solo click — para cargar facturas viejas sin destildar uno por uno. */
+document.body.addEventListener("click", (event) => {
+  const selectAllId = event.target.dataset?.selectAll;
+  const selectNoneId = event.target.dataset?.selectNone;
+  if (!selectAllId && !selectNoneId) return;
+  const container = document.getElementById(selectAllId || selectNoneId);
+  if (!container) return;
+  const checked = Boolean(selectAllId);
+  container.querySelectorAll(".picker-check").forEach((el) => {
+    el.checked = checked;
+  });
+  container._recompute?.();
+});
 
 ["#clientInvoiceForm", "#providerInvoiceForm"].forEach((selector) => {
   const form = $(selector);

@@ -356,6 +356,19 @@ output {
   padding: 7px 0;
 }
 
+.picker-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+  text-transform: none;
+}
+
+.picker-toolbar button {
+  min-height: 28px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .picker {
   max-height: 480px;
   overflow: auto;

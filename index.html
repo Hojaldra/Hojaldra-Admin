@@ -249,6 +249,10 @@
             <label>N Factura<input name="number" required /></label>
             <label>Emision<input name="issueDate" type="date" required /></label>
             <label class="wide">Remitos a incluir (tildá los que corresponden)
+              <div class="picker-toolbar">
+                <button type="button" data-select-all="clientInvoicePicker">Marcar todos</button>
+                <button type="button" data-select-none="clientInvoicePicker">Desmarcar todos</button>
+              </div>
               <div id="clientInvoicePicker" class="picker"></div>
             </label>
             <label>Total remitos tildados (c/IVA)<output id="clientInvoiceTotal">$0</output></label>
@@ -271,6 +275,10 @@
             <label>N Factura<input name="number" required /></label>
             <label>Recepcion<input name="issueDate" type="date" required /></label>
             <label class="wide">Remitos listos para facturar (ya cobrados al cliente)
+              <div class="picker-toolbar">
+                <button type="button" data-select-all="providerInvoicePicker">Marcar todos</button>
+                <button type="button" data-select-none="providerInvoicePicker">Desmarcar todos</button>
+              </div>
               <div id="providerInvoicePicker" class="picker"></div>
             </label>
             <label>Total remitos tildados (c/IVA)<output id="providerInvoiceTotal">$0</output></label>
