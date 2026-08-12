@@ -453,6 +453,18 @@ li {
   margin: 4px 0;
 }
 
+.deliveries-table {
+  table-layout: fixed;
+  min-width: 1100px;
+}
+
+.deliveries-table th,
+.deliveries-table td {
+  padding: 7px 8px;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
 .sync-status {
   font-size: 12px;
   font-weight: 700;
