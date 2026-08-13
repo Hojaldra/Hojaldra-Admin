@@ -982,7 +982,6 @@ function renderProviderPayables(rows) {
 // Estado del sort de la tabla de Facturas — persiste mientras dure la sesión,
 // no hace falta guardarlo en el state porque es solo una preferencia de vista.
 let invoiceSort = { field: "issueDate", dir: "desc" };
-let invoicePendingFirst = false;
 
 // field=null significa "columna no ordenable" (las celdas compuestas, como
 // Retenciones o Cheque/OP, no tienen un único valor comparable).
@@ -1021,7 +1020,7 @@ function invoiceRowData(item) {
 function sortInvoiceRows(rows) {
   const { field, dir } = invoiceSort;
   const mult = dir === "asc" ? 1 : -1;
-  const sorted = [...rows].sort((a, b) => {
+  return [...rows].sort((a, b) => {
     let va = a[field];
     let vb = b[field];
     if (typeof va === "string") va = va.toLowerCase();
@@ -1032,13 +1031,6 @@ function sortInvoiceRows(rows) {
     if (va > vb) return 1 * mult;
     return 0;
   });
-  // "Pendientes primero" no reemplaza el ordenamiento elegido — solo agrupa
-  // arriba todo lo que no esté en PAGO, manteniendo el orden de columna
-  // adentro de cada grupo.
-  if (!invoicePendingFirst) return sorted;
-  const pending = sorted.filter((r) => r.status !== "PAGO");
-  const done = sorted.filter((r) => r.status === "PAGO");
-  return [...pending, ...done];
 }
 
 function sortArrow(field) {
@@ -1188,12 +1180,6 @@ document.body.addEventListener("click", (event) => {
   } else {
     invoiceSort = { field, dir: "asc" };
   }
-  renderInvoices();
-});
-
-$("#invoicesPendingFirstBtn").addEventListener("click", () => {
-  invoicePendingFirst = !invoicePendingFirst;
-  $("#invoicesPendingFirstBtn").classList.toggle("active", invoicePendingFirst);
   renderInvoices();
 });
 

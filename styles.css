@@ -523,12 +523,6 @@ th.sortable:hover {
   color: var(--green);
 }
 
-#invoicesPendingFirstBtn.active {
-  background: var(--green);
-  border-color: var(--green);
-  color: white;
-}
-
 .note-icon {
   border: none;
   background: transparent;
