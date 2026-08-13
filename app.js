@@ -375,15 +375,6 @@ function periodLabelFor(clientId, dateText) {
   return `Semana ${periodKeyFor(clientId, dateText)} (${fmtDDMM(start)} - ${fmtDDMM(end)})`;
 }
 
-/** Version corta de periodLabelFor para columnas angostas (ej. el picker de remitos a facturar). */
-function weekShortLabel(clientId, dateText) {
-  const client = byId(state.clients, clientId);
-  if (!client) return "";
-  if (client.billingCycle === "monthly") return dateText.slice(0, 7);
-  if (client.billingCycle === "po") return "OC";
-  return `Sem. ${periodKeyFor(clientId, dateText)}`;
-}
-
 function activeFilters() {
   return {
     month: $("#monthFilter").value,
@@ -563,10 +554,14 @@ function renderDeliveries() {
     const provider = byId(state.providers, item.providerId)?.name || "";
     const product = byId(state.products, item.productId)?.name || "";
     const status = deliveryStatus(item.id);
+    const noteCell = item.note
+      ? `<button type="button" class="note-icon" data-view-note="${item.id}" title="${escapeHtml(item.note)}">📝</button>`
+      : "";
     return `<tr>
       <td>${item.date}</td>
       <td>${escapeHtml(periodLabelFor(item.clientId, item.date))}</td>
       <td>${escapeHtml(item.receiptNo)}</td>
+      <td>${noteCell}</td>
       <td>${escapeHtml(client)}</td>
       <td>${escapeHtml(loc)}</td>
       <td>${escapeHtml(provider)}</td>
@@ -578,7 +573,7 @@ function renderDeliveries() {
       <td><span class="status ${status}">${deliveryStatusLabel(status)}</span></td>
       <td><button type="button" data-delete-delivery="${item.id}" title="Eliminar">Borrar</button></td>
     </tr>`;
-  }).join("") : empty(13);
+  }).join("") : empty(14);
 
   const totals = rows.reduce((acc, item) => {
     const t = totalsFor(item);
@@ -594,63 +589,17 @@ function renderDeliveries() {
   $("#kpiIva").textContent = money(totals.profitNet * IVA_RATE - retIvaForDeliveries(rows));
 }
 
-/**
- * Retenciones de IVA ya confirmadas (facturas de cliente PAGO) que tocan a
- * estos remitos, PRORRATEADAS. Si una factura junta remitos de más de un
- * período (ej. junio y julio en una sola factura), no restamos la
- * retención completa apenas aparezca un remito de esa factura — restamos
- * solo la porción de la retención que corresponde a la venta de ESTE
- * período, según qué parte del monto total de la factura cae en `rows`.
- * Evita restar de más (o duplicar la resta) al mirar distintos meses/semanas.
- */
+/** Retenciones de IVA ya confirmadas (facturas de cliente PAGO) que tocan a estos remitos. */
 function retIvaForDeliveries(rows) {
-  const idsInView = new Set(rows.map((r) => r.id));
-  const relevantInvoices = state.invoices.filter((inv) =>
-    inv.type === "client" && inv.status === "PAGO" && (inv.deliveryIds || []).some((id) => idsInView.has(id))
+  const ids = new Set(rows.map((r) => r.id));
+  const relevant = state.invoices.filter((inv) =>
+    inv.type === "client" && inv.status === "PAGO" && (inv.deliveryIds || []).some((id) => ids.has(id))
   );
-  return relevantInvoices.reduce((sum, inv) => {
-    const invDeliveries = (inv.deliveryIds || []).map((id) => byId(state.deliveries, id)).filter(Boolean);
-    const invTotalSale = invDeliveries.reduce((s, d) => s + totalsFor(d).saleNet, 0);
-    if (invTotalSale <= 0) return sum;
-    const inViewSale = invDeliveries
-      .filter((d) => idsInView.has(d.id))
-      .reduce((s, d) => s + totalsFor(d).saleNet, 0);
-    const fraction = inViewSale / invTotalSale;
-    return sum + Number(inv.retIva || 0) * fraction;
-  }, 0);
-}
-
-// Estado del orden actual de la tabla de Precios. Por defecto: Cliente,
-// despues Sala, despues Producto -- asi arranca ya agrupado de forma util.
-let ruleSort = { key: "client", dir: "asc" };
-
-function ruleSortValue(item, key) {
-  if (key === "client") return byId(state.clients, item.clientId)?.name || "";
-  if (key === "location") return byId(state.locations, item.locationId)?.name || "";
-  if (key === "provider") return byId(state.providers, item.providerId)?.name || "";
-  if (key === "product") return byId(state.products, item.productId)?.name || "";
-  if (key === "salePrice") return Number(item.salePrice) || 0;
-  if (key === "commissionPct") return Number(item.commissionPct) || 0;
-  if (key === "cost") return item.salePrice * (1 - Number(item.commissionPct || 0) / 100);
-  if (key === "validFrom") return item.validFrom || "";
-  return "";
+  return relevant.reduce((sum, inv) => sum + Number(inv.retIva || 0), 0);
 }
 
 function renderRules() {
-  const sorted = [...state.priceRules].sort((a, b) => {
-    const va = ruleSortValue(a, ruleSort.key);
-    const vb = ruleSortValue(b, ruleSort.key);
-    const cmp = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb));
-    return ruleSort.dir === "asc" ? cmp : -cmp;
-  });
-
-  document.querySelectorAll("#rules th.sortable").forEach((th) => {
-    th.classList.toggle("sort-active", th.dataset.sort === ruleSort.key);
-    const arrow = th.dataset.sort === ruleSort.key ? (ruleSort.dir === "asc" ? "▲" : "▼") : "▲";
-    th.innerHTML = `${th.textContent.replace(/[▲▼]/g, "").trim()} <span class="sort-arrow">${arrow}</span>`;
-  });
-
-  $("#ruleRows").innerHTML = sorted.map((item) => {
+  $("#ruleRows").innerHTML = state.priceRules.map((item) => {
     const client = byId(state.clients, item.clientId)?.name || "";
     const loc = byId(state.locations, item.locationId)?.name || "";
     const provider = byId(state.providers, item.providerId)?.name || "";
@@ -669,73 +618,19 @@ function renderRules() {
   }).join("");
 }
 
-document.querySelectorAll("#rules th.sortable").forEach((th) => {
-  th.addEventListener("click", () => {
-    if (ruleSort.key === th.dataset.sort) {
-      ruleSort.dir = ruleSort.dir === "asc" ? "desc" : "asc";
-    } else {
-      ruleSort = { key: th.dataset.sort, dir: "asc" };
-    }
-    renderRules();
-  });
-});
-
 function renderCatalogs() {
   $("#providerList").innerHTML = state.providers.map((item) =>
-    `<li><span>${escapeHtml(item.name)}</span><span><button type="button" class="edit-btn" data-edit-provider="${item.id}">Editar</button> <button type="button" class="edit-btn danger" data-delete-provider="${item.id}">Borrar</button></span></li>`
+    `<li>${escapeHtml(item.name)} <button type="button" class="edit-btn" data-edit-provider="${item.id}">Editar</button></li>`
   ).join("");
   $("#clientList").innerHTML = state.clients.map((item) =>
-    `<li><span>${escapeHtml(item.name)} - ${cycleLabel(item.billingCycle)}${item.billingCycle === "weekly" ? ` (arranca ${dayLabel(item.weekStartDay)})` : ""}</span><span><button type="button" class="edit-btn" data-edit-client="${item.id}">Editar</button> <button type="button" class="edit-btn danger" data-delete-client="${item.id}">Borrar</button></span></li>`
+    `<li>${escapeHtml(item.name)} - ${cycleLabel(item.billingCycle)}${item.billingCycle === "weekly" ? ` (arranca ${dayLabel(item.weekStartDay)})` : ""} <button type="button" class="edit-btn" data-edit-client="${item.id}">Editar</button></li>`
   ).join("");
   $("#locationList").innerHTML = state.locations.map((item) =>
-    `<li><span>${escapeHtml(item.name)} - ${escapeHtml(byId(state.clients, item.clientId)?.name || "")}</span><span><button type="button" class="edit-btn" data-edit-location="${item.id}">Editar</button> <button type="button" class="edit-btn danger" data-delete-location="${item.id}">Borrar</button></span></li>`
+    `<li>${escapeHtml(item.name)} - ${escapeHtml(byId(state.clients, item.clientId)?.name || "")} <button type="button" class="edit-btn" data-edit-location="${item.id}">Editar</button></li>`
   ).join("");
   $("#productList").innerHTML = state.products.map((item) =>
-    `<li><span>${escapeHtml(item.name)} - ${escapeHtml(item.unit)}</span><span><button type="button" class="edit-btn" data-edit-product="${item.id}">Editar</button> <button type="button" class="edit-btn danger" data-delete-product="${item.id}">Borrar</button></span></li>`
+    `<li>${escapeHtml(item.name)} - ${escapeHtml(item.unit)} <button type="button" class="edit-btn" data-edit-product="${item.id}">Editar</button></li>`
   ).join("");
-}
-
-/**
- * Chequea si un registro de catálogo todavía está referenciado en algún
- * lado antes de dejarlo borrar. Devuelve un array de strings con lo que
- * lo está bloqueando (vacío = se puede borrar tranquilo).
- */
-function catalogReferences(type, id) {
-  const blockers = [];
-  const count = (arr, label) => { if (arr.length) blockers.push(`${arr.length} ${label}`); };
-
-  if (type === "client") {
-    count(state.locations.filter((l) => l.clientId === id), "sala(s)");
-    count(state.deliveries.filter((d) => d.clientId === id), "remito(s)");
-    count(state.priceRules.filter((r) => r.clientId === id), "regla(s) de precio");
-    count(state.invoices.filter((i) => i.clientId === id), "factura(s)");
-  }
-  if (type === "provider") {
-    count(state.deliveries.filter((d) => d.providerId === id), "remito(s)");
-    count(state.priceRules.filter((r) => r.providerId === id), "regla(s) de precio");
-    count(state.invoices.filter((i) => i.type === "provider" && i.providerId === id), "factura(s)");
-  }
-  if (type === "location") {
-    count(state.deliveries.filter((d) => d.locationId === id), "remito(s)");
-    count(state.priceRules.filter((r) => r.locationId === id), "regla(s) de precio");
-    count(state.invoices.filter((i) => i.locationId === id), "factura(s)");
-  }
-  if (type === "product") {
-    count(state.deliveries.filter((d) => d.productId === id), "remito(s)");
-    count(state.priceRules.filter((r) => r.productId === id), "regla(s) de precio");
-  }
-  return blockers;
-}
-
-function tryDeleteCatalogItem(type, id, collectionName, label) {
-  const blockers = catalogReferences(type, id);
-  if (blockers.length) {
-    alert(`No se puede borrar "${label}" — todavía está referenciado por: ${blockers.join(", ")}.\n\nPrimero corregí o borrá esas referencias (por ejemplo, reasigná esas salas/remitos/reglas a otro cliente) y volvé a intentar.`);
-    return;
-  }
-  if (!confirm(`¿Borrar "${label}" definitivamente? No tiene nada vinculado, así que es seguro.`)) return;
-  state[collectionName] = state[collectionName].filter((item) => item.id !== id);
-  render();
 }
 
 function deliveryStatusLabel(status) {
@@ -750,35 +645,9 @@ function renderReports() {
   const rows = filteredDeliveries();
   renderSalaWeekRows(rows);
   $("#reportGridFilterLabel").textContent = "Mostrando: " + activeFiltersLabel();
-  renderReceivables(rows);
+  renderGroup("#receivableRows", rows, (item) => byId(state.clients, item.clientId)?.name || "", (t) => t.saleNet * (1 + IVA_RATE));
   renderProviderPayables(rows);
   renderGroup("#profitRows", rows, (item) => byId(state.locations, item.locationId)?.name || "", (t) => t.profitNet);
-}
-
-/**
- * "Pendiente de cobro" = remitos cuyo estado todavía es PENDIENTE o
- * FACTURADO (la sala todavía no pagó). Una vez que pasa a COBRADO,
- * PROV_PENDIENTE o PAGO, el cliente ya pagó su factura.
- */
-function renderReceivables(rows) {
-  const map = new Map();
-  rows.forEach((item) => {
-    const clientName = byId(state.clients, item.clientId)?.name || "";
-    const current = map.get(item.clientId) || { name: clientName, total: 0, pending: 0 };
-    const gross = totalsFor(item).saleNet * (1 + IVA_RATE);
-    current.total += gross;
-    const status = deliveryStatus(item.id);
-    if (status === "PENDIENTE" || status === "FACTURADO") current.pending += gross;
-    map.set(item.clientId, current);
-  });
-  const grouped = [...map.values()].sort((a, b) => b.total - a.total);
-  const total = grouped.reduce((sum, item) => sum + item.total, 0);
-  const totalPending = grouped.reduce((sum, item) => sum + item.pending, 0);
-  $("#receivableRows").innerHTML = grouped.length
-    ? `<tr><th>Cliente</th><th class="num">Devengado total</th><th class="num">Pendiente de cobro</th></tr>
-      ${grouped.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td class="num">${money(item.total)}</td><td class="num">${money(item.pending)}</td></tr>`).join("")}
-      <tr><th>Total clientes</th><th class="num">${money(total)}</th><th class="num">${money(totalPending)}</th></tr>`
-    : `<tr><td class="empty">Sin datos.</td></tr>`;
 }
 
 /** Texto legible de qué filtros del toolbar de arriba están afectando estos 3 resúmenes. */
@@ -1091,53 +960,108 @@ $("#openingBalance").addEventListener("input", (event) => {
   renderMonthlyTable();
 });
 
-/**
- * "Pendiente de pago" = remitos cuyo estado todavía no es PAGO — incluye
- * los que ni siquiera están habilitados para pagarle al proveedor todavía
- * (falta que la sala pague primero). Es "lo que en algún momento le vamos
- * a tener que pagar a este proveedor y todavía no le pagamos", no
- * necesariamente "lo que hay que pagar ya mismo" (para eso está la
- * columna "Estado / reclamo" de la tabla de arriba, que sí distingue caso
- * por caso).
- */
 function renderProviderPayables(rows) {
   const map = new Map();
   rows.forEach((item) => {
     const provider = byId(state.providers, item.providerId)?.name || "";
     const period = periodLabelFor(item.clientId, item.date);
     const key = `${item.providerId}|${period}`;
-    const current = map.get(key) || { provider, period, total: 0, pending: 0 };
-    const gross = totalsFor(item).providerNet * (1 + IVA_RATE);
-    current.total += gross;
-    if (deliveryStatus(item.id) !== "PAGO") current.pending += gross;
+    const current = map.get(key) || { provider, period, providerGross: 0 };
+    current.providerGross += totalsFor(item).providerNet * (1 + IVA_RATE);
     map.set(key, current);
   });
   const grouped = [...map.values()].sort((a, b) => a.provider.localeCompare(b.provider));
-  const total = grouped.reduce((sum, item) => sum + item.total, 0);
-  const totalPending = grouped.reduce((sum, item) => sum + item.pending, 0);
+  const total = grouped.reduce((sum, item) => sum + item.providerGross, 0);
   $("#payableRows").innerHTML = grouped.length
-    ? `<tr><th>Proveedor</th><th>Periodo</th><th class="num">Devengado c/IVA</th><th class="num">Pendiente de pago</th></tr>
-      ${grouped.map((item) => `<tr><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.period)}</td><td class="num">${money(item.total)}</td><td class="num">${money(item.pending)}</td></tr>`).join("")}
-      <tr><th colspan="2">Total proveedores</th><th class="num">${money(total)}</th><th class="num">${money(totalPending)}</th></tr>`
+    ? `<tr><th>Proveedor</th><th>Periodo</th><th class="num">A pagar c/IVA</th></tr>
+      ${grouped.map((item) => `<tr><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.period)}</td><td class="num">${money(item.providerGross)}</td></tr>`).join("")}
+      <tr><th colspan="2">Total proveedores</th><th class="num">${money(total)}</th></tr>`
     : `<tr><td class="empty">Sin datos.</td></tr>`;
 }
 
+// Estado del sort de la tabla de Facturas — persiste mientras dure la sesión,
+// no hace falta guardarlo en el state porque es solo una preferencia de vista.
+let invoiceSort = { field: "issueDate", dir: "desc" };
+let invoicePendingFirst = false;
+
+// field=null significa "columna no ordenable" (las celdas compuestas, como
+// Retenciones o Cheque/OP, no tienen un único valor comparable).
+const INVOICE_COLUMNS = [
+  { field: "type", label: "Tipo" },
+  { field: "entity", label: "Entidad" },
+  { field: "location", label: "Sala" },
+  { field: "number", label: "N Factura" },
+  { field: "issueDate", label: "Emision" },
+  { field: "deliveryCount", label: "Remitos", num: true },
+  { field: null, label: "Retenciones (si aplica)" },
+  { field: null, label: "Cheque / Orden de pago (si aplica)" },
+  { field: "paymentDate", label: "Pago" },
+  { field: "amountGross", label: "Monto c/IVA", num: true },
+  { field: "neto", label: "Neto real", num: true },
+  { field: "status", label: "Estado" },
+  { field: null, label: "" }
+];
+
+function invoiceRowData(item) {
+  const entity = item.type === "client"
+    ? byId(state.clients, item.clientId)?.name || ""
+    : byId(state.providers, item.providerId)?.name || "";
+  const location = item.locationId ? byId(state.locations, item.locationId)?.name || "" : "";
+  const retIva = Number(item.retIva || 0);
+  const retGan = Number(item.retGanancias || 0);
+  return {
+    ...item,
+    entity,
+    location,
+    neto: Number(item.amountGross || 0) - retIva - retGan,
+    deliveryCount: (item.deliveryIds || []).length
+  };
+}
+
+function sortInvoiceRows(rows) {
+  const { field, dir } = invoiceSort;
+  const mult = dir === "asc" ? 1 : -1;
+  const sorted = [...rows].sort((a, b) => {
+    let va = a[field];
+    let vb = b[field];
+    if (typeof va === "string") va = va.toLowerCase();
+    if (typeof vb === "string") vb = vb.toLowerCase();
+    if (va === undefined || va === "") va = dir === "asc" ? "\uffff" : "";
+    if (vb === undefined || vb === "") vb = dir === "asc" ? "\uffff" : "";
+    if (va < vb) return -1 * mult;
+    if (va > vb) return 1 * mult;
+    return 0;
+  });
+  // "Pendientes primero" no reemplaza el ordenamiento elegido — solo agrupa
+  // arriba todo lo que no esté en PAGO, manteniendo el orden de columna
+  // adentro de cada grupo.
+  if (!invoicePendingFirst) return sorted;
+  const pending = sorted.filter((r) => r.status !== "PAGO");
+  const done = sorted.filter((r) => r.status === "PAGO");
+  return [...pending, ...done];
+}
+
+function sortArrow(field) {
+  if (invoiceSort.field !== field) return "";
+  return invoiceSort.dir === "asc" ? " ▲" : " ▼";
+}
+
 function renderInvoices() {
-  const rows = [...(state.invoices || [])].sort((a, b) => (b.issueDate || "").localeCompare(a.issueDate || ""));
-  const header = `<tr>
-      <th>Tipo</th><th>Entidad</th><th>Sala</th><th>N Factura</th><th>Emision</th><th>Remitos</th>
-      <th>Retenciones (si aplica)</th><th>Cheque / Orden de pago (si aplica)</th><th>Pago</th><th class="num">Monto c/IVA</th><th class="num">Neto real</th><th>Estado</th><th></th>
-    </tr>`;
+  const rows = sortInvoiceRows((state.invoices || []).map(invoiceRowData));
+
+  const header = `<tr>${INVOICE_COLUMNS.map((col) => {
+    if (!col.field) return `<th${col.num ? ' class="num"' : ""}>${escapeHtml(col.label)}</th>`;
+    return `<th data-sort-field="${col.field}" class="sortable${col.num ? " num" : ""}" title="Ordenar por ${escapeHtml(col.label)}">${escapeHtml(col.label)}${sortArrow(col.field)}</th>`;
+  }).join("")}</tr>`;
+
   if (!rows.length) {
     $("#invoiceRows").innerHTML = header + empty(13);
     return;
   }
   $("#invoiceRows").innerHTML = header + rows.map((item) => {
-    const entity = item.type === "client"
-      ? byId(state.clients, item.clientId)?.name || ""
-      : byId(state.providers, item.providerId)?.name || "";
-    const location = item.locationId ? byId(state.locations, item.locationId)?.name || "" : "";
-    const nDeliveries = (item.deliveryIds || []).length;
+    const entity = item.entity;
+    const location = item.location;
+    const nDeliveries = item.deliveryCount;
     const retIva = Number(item.retIva || 0);
     const retGan = Number(item.retGanancias || 0);
     const neto = Number(item.amountGross || 0) - retIva - retGan;
@@ -1253,6 +1177,26 @@ toggleWeekStartDayField();
   $(selector).addEventListener("change", render);
 });
 
+// Ordenar Facturas: click en cualquier header ordenable. Si ya estaba
+// ordenado por esa misma columna, invierte el sentido en vez de resetear.
+document.body.addEventListener("click", (event) => {
+  const sortTh = event.target.closest("th[data-sort-field]");
+  if (!sortTh) return;
+  const field = sortTh.dataset.sortField;
+  if (invoiceSort.field === field) {
+    invoiceSort = { field, dir: invoiceSort.dir === "asc" ? "desc" : "asc" };
+  } else {
+    invoiceSort = { field, dir: "asc" };
+  }
+  renderInvoices();
+});
+
+$("#invoicesPendingFirstBtn").addEventListener("click", () => {
+  invoicePendingFirst = !invoicePendingFirst;
+  $("#invoicesPendingFirstBtn").classList.toggle("active", invoicePendingFirst);
+  renderInvoices();
+});
+
 ["#deliveryForm", "#ruleForm", "#clientInvoiceForm", "#providerInvoiceForm"].forEach((selector) => {
   const form = $(selector);
   form.elements.clientId.addEventListener("change", () => filterLocationSelectByClient(form));
@@ -1263,22 +1207,14 @@ toggleWeekStartDayField();
  * Se recalcula cada vez que cambia cliente/sala/proveedor, o cuando se
  * tilda/destilda un remito puntual.
  */
-/** Recorta una lista de remitos candidatos a los de una semana puntual (si se cargó el filtro). */
-function filterByWeek(candidates, weekFilter) {
-  if (weekFilter === undefined || weekFilter === "") return candidates;
-  return candidates.filter((item) => periodKeyFor(item.clientId, item.date) === String(weekFilter));
-}
-
 function renderInvoicePickers() {
   renderPicker({
     containerSelector: "#clientInvoicePicker",
     totalSelector: "#clientInvoiceTotal",
     form: $("#clientInvoiceForm"),
-    getCandidates: (data) => {
-      if (!data.clientId || !data.locationId) return [];
-      const candidates = candidateDeliveries({ clientId: data.clientId, locationId: data.locationId, mode: "client" });
-      return filterByWeek(candidates, data.weekFilter);
-    },
+    getCandidates: (data) => data.clientId && data.locationId
+      ? candidateDeliveries({ clientId: data.clientId, locationId: data.locationId, mode: "client" })
+      : [],
     valueFn: (t) => t.saleNet,
     emptyMessage: "No hay remitos pendientes de facturar para esta sala."
   });
@@ -1287,11 +1223,9 @@ function renderInvoicePickers() {
     containerSelector: "#providerInvoicePicker",
     totalSelector: "#providerInvoiceTotal",
     form: $("#providerInvoiceForm"),
-    getCandidates: (data) => {
-      if (!data.clientId || !data.locationId || !data.providerId) return [];
-      const candidates = candidateDeliveries({ clientId: data.clientId, locationId: data.locationId, providerId: data.providerId, mode: "provider" });
-      return filterByWeek(candidates, data.weekFilter);
-    },
+    getCandidates: (data) => data.clientId && data.locationId && data.providerId
+      ? candidateDeliveries({ clientId: data.clientId, locationId: data.locationId, providerId: data.providerId, mode: "provider" })
+      : [],
     valueFn: (t) => t.providerNet,
     emptyMessage: "No hay remitos listos para este proveedor todavía — recordá que primero tiene que estar cobrada la factura del cliente."
   });
@@ -1309,16 +1243,17 @@ function renderPicker({ containerSelector, totalSelector, form, getCandidates, v
   }
 
   container.innerHTML = `<table class="picker-table">
-    <thead><tr><th></th><th>Fecha</th><th>Semana</th><th>Remito</th><th>Producto</th><th class="num">Cant.</th><th class="num">Monto</th></tr></thead>
+    <thead><tr><th></th><th>Fecha</th><th>Remito</th><th>Sala</th><th>Producto</th><th class="num">Cant.</th><th class="num">Monto</th></tr></thead>
     <tbody>
       ${candidates.map((item) => {
         const t = totalsFor(item);
+        const loc = byId(state.locations, item.locationId)?.name || "";
         const product = byId(state.products, item.productId)?.name || "";
         return `<tr>
           <td><input type="checkbox" class="picker-check" data-picker-id="${item.id}" checked /></td>
           <td>${item.date}</td>
-          <td title="${escapeHtml(periodLabelFor(item.clientId, item.date))}">${escapeHtml(weekShortLabel(item.clientId, item.date))}</td>
           <td>${escapeHtml(item.receiptNo)}</td>
+          <td>${escapeHtml(loc)}</td>
           <td>${escapeHtml(product)}</td>
           <td class="num">${Number(item.quantity).toLocaleString("es-AR")}</td>
           <td class="num">${money(valueFn(t) * (1 + IVA_RATE))}</td>
@@ -1338,22 +1273,7 @@ function renderPicker({ containerSelector, totalSelector, form, getCandidates, v
   };
   container.querySelectorAll(".picker-check").forEach((el) => el.addEventListener("change", recompute));
   recompute();
-  container._recompute = recompute;
 }
-
-/** Marcar/Desmarcar todos los remitos visibles en un picker de un solo click — para cargar facturas viejas sin destildar uno por uno. */
-document.body.addEventListener("click", (event) => {
-  const selectAllId = event.target.dataset?.selectAll;
-  const selectNoneId = event.target.dataset?.selectNone;
-  if (!selectAllId && !selectNoneId) return;
-  const container = document.getElementById(selectAllId || selectNoneId);
-  if (!container) return;
-  const checked = Boolean(selectAllId);
-  container.querySelectorAll(".picker-check").forEach((el) => {
-    el.checked = checked;
-  });
-  container._recompute?.();
-});
 
 ["#clientInvoiceForm", "#providerInvoiceForm"].forEach((selector) => {
   const form = $(selector);
@@ -1365,7 +1285,6 @@ document.body.addEventListener("click", (event) => {
   ["clientId", "locationId", "providerId"].forEach((field) => {
     form.elements[field]?.addEventListener("change", renderInvoicePickers);
   });
-  form.elements.weekFilter?.addEventListener("input", renderInvoicePickers);
 });
 
 /** Chequeo de duplicados: mismo proveedor + N de remito + sala + producto ya cargado. */
@@ -1479,29 +1398,6 @@ addOrEditFromForm($("#productForm"), "products", (v, editingId) => ({
 }), "Agregar producto");
 
 document.body.addEventListener("click", (event) => {
-  const deleteProviderId = event.target.dataset?.deleteProvider;
-  const deleteClientId = event.target.dataset?.deleteClient;
-  const deleteLocationId = event.target.dataset?.deleteLocation;
-  const deleteProductId = event.target.dataset?.deleteProduct;
-  if (deleteProviderId) {
-    const item = byId(state.providers, deleteProviderId);
-    tryDeleteCatalogItem("provider", deleteProviderId, "providers", item?.name || deleteProviderId);
-  }
-  if (deleteClientId) {
-    const item = byId(state.clients, deleteClientId);
-    tryDeleteCatalogItem("client", deleteClientId, "clients", item?.name || deleteClientId);
-  }
-  if (deleteLocationId) {
-    const item = byId(state.locations, deleteLocationId);
-    tryDeleteCatalogItem("location", deleteLocationId, "locations", item?.name || deleteLocationId);
-  }
-  if (deleteProductId) {
-    const item = byId(state.products, deleteProductId);
-    tryDeleteCatalogItem("product", deleteProductId, "products", item?.name || deleteProductId);
-  }
-});
-
-document.body.addEventListener("click", (event) => {
   const providerId = event.target.dataset?.editProvider;
   const clientId = event.target.dataset?.editClient;
   const locationId = event.target.dataset?.editLocation;
@@ -1590,6 +1486,11 @@ document.body.addEventListener("click", (event) => {
   const paymentId = event.target.dataset?.savePayment;
   const expenseId = event.target.dataset?.deleteExpense;
   const chequeId = event.target.dataset?.saveCheque;
+  const noteId = event.target.dataset?.viewNote;
+  if (noteId) {
+    const item = byId(state.deliveries, noteId);
+    if (item?.note) alert(`Nota del remito ${item.receiptNo}:\n\n${item.note}`);
+  }
   if (chequeId) {
     const invoiceItem = state.invoices.find((item) => item.id === chequeId);
     const numeroInput = document.querySelector(`input[data-cheque-numero="${chequeId}"]`);
@@ -1647,98 +1548,17 @@ $("#exportBtn").addEventListener("click", () => {
   URL.revokeObjectURL(url);
 });
 
-/**
- * Fusiona un JSON importado con lo que ya está cargado, EN VEZ de
- * reemplazar todo. Pensado para subir los masters sala por sala sin
- * pisar lo anterior.
- *  - Catálogos (proveedores/clientes/salas/productos): si el id ya
- *    existe, se deja el que ya estaba (no se pisa) — así no rompe
- *    referencias existentes con datos distintos. Si es nuevo, se agrega.
- *  - Reglas de precio: se evita agregar una regla EXACTAMENTE igual
- *    (mismo cliente+sala+proveedor+producto+vigencia) dos veces.
- *  - Remitos: mismo criterio que ya usa la carga manual (proveedor +
- *    N remito + sala + producto) para no duplicar el mismo remito.
- *  - Facturas y gastos: se agregan por id (los ids son únicos random,
- *    solo chocarían si se importa el mismo archivo dos veces).
- * Devuelve un resumen de cuántos remitos se saltearon por duplicados.
- */
-function mergeState(imported) {
-  const summary = { addedDeliveries: 0, skippedDeliveries: 0, addedRules: 0, skippedRules: 0 };
-
-  ["providers", "clients", "locations", "products"].forEach((key) => {
-    const existingIds = new Set(state[key].map((item) => item.id));
-    (imported[key] || []).forEach((item) => {
-      if (!existingIds.has(item.id)) {
-        state[key].push(item);
-        existingIds.add(item.id);
-      }
-    });
-  });
-
-  const ruleKey = (r) => `${r.clientId}|${r.locationId}|${r.providerId}|${r.productId}|${r.validFrom}`;
-  const existingRuleKeys = new Set(state.priceRules.map(ruleKey));
-  (imported.priceRules || []).forEach((r) => {
-    const key = ruleKey(r);
-    if (!existingRuleKeys.has(key)) {
-      state.priceRules.push(r);
-      existingRuleKeys.add(key);
-      summary.addedRules++;
-    } else {
-      summary.skippedRules++;
-    }
-  });
-
-  const delivKey = (d) => `${d.providerId}|${String(d.receiptNo).trim().toLowerCase()}|${d.locationId}|${d.productId}`;
-  const existingDelivKeys = new Set(state.deliveries.map(delivKey));
-  (imported.deliveries || []).forEach((d) => {
-    const key = delivKey(d);
-    if (!existingDelivKeys.has(key)) {
-      state.deliveries.push(d);
-      existingDelivKeys.add(key);
-      summary.addedDeliveries++;
-    } else {
-      summary.skippedDeliveries++;
-    }
-  });
-
-  const existingInvoiceIds = new Set(state.invoices.map((i) => i.id));
-  (imported.invoices || []).forEach((inv) => {
-    if (!existingInvoiceIds.has(inv.id)) {
-      state.invoices.push(inv);
-      existingInvoiceIds.add(inv.id);
-    }
-  });
-
-  const existingExpenseIds = new Set(state.expenses.map((e) => e.id));
-  (imported.expenses || []).forEach((e) => {
-    if (!existingExpenseIds.has(e.id)) {
-      state.expenses.push(e);
-      existingExpenseIds.add(e.id);
-    }
-  });
-
-  return summary;
-}
-
 $("#importFile").addEventListener("change", async (event) => {
   const file = event.target.files[0];
   if (!file) return;
-  const imported = JSON.parse(await file.text());
-  const mergeMode = $("#importMergeMode").checked;
+  state = JSON.parse(await file.text());
+  render();
+});
 
-  if (mergeMode) {
-    const summary = mergeState(imported);
-    render();
-    alert(`Fusión completa.\n\nRemitos agregados: ${summary.addedDeliveries}${summary.skippedDeliveries ? ` (se saltearon ${summary.skippedDeliveries} por estar duplicados)` : ""}\nReglas de precio agregadas: ${summary.addedRules}${summary.skippedRules ? ` (se saltearon ${summary.skippedRules} por estar duplicadas)` : ""}`);
-  } else {
-    if (!confirm("Esto va a BORRAR todos los datos actuales y reemplazarlos por el archivo importado. ¿Seguro que querés reemplazar en vez de fusionar?")) {
-      event.target.value = "";
-      return;
-    }
-    state = imported;
-    render();
-  }
-  event.target.value = "";
+$("#resetBtn").addEventListener("click", () => {
+  if (!confirm("Restaurar datos demo?")) return;
+  state = structuredClone(seed);
+  render();
 });
 
 function slug(value) {
