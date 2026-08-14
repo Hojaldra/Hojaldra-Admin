@@ -1044,6 +1044,7 @@ function renderOpList() {
         <td><span class="status ${c.status}">${c.status}</span></td>
         <td>
           ${c.status === "RECIBIDO" ? `<button type="button" class="small" data-check-acreditado="${c.id}">Marcar acreditado</button> <button type="button" class="small" data-check-rechazado="${c.id}">Marcar rechazado</button>` : ""}
+          <button type="button" class="small remove-btn" data-delete-check="${c.id}" title="Borrar este cheque">Borrar</button>
         </td>
       </tr>`).join("");
     return `<div class="op-card">
@@ -1068,7 +1069,16 @@ function renderOpList() {
           <thead><tr><th>Cheque</th><th>Banco</th><th>Fecha pago</th><th class="num">Monto</th><th>Estado</th><th></th></tr></thead>
           <tbody>${checkRows}</tbody>
         </table>
+        <div class="cheque-draft-row" style="margin-top:10px">
+          <label>N° cheque<input type="text" data-add-check-field="numero" data-add-check-op="${op.id}" /></label>
+          <label>Banco<input type="text" data-add-check-field="banco" data-add-check-op="${op.id}" /></label>
+          <label>Emisión<input type="date" data-add-check-field="fechaEmision" data-add-check-op="${op.id}" /></label>
+          <label>Fecha pago<input type="date" data-add-check-field="fechaPago" data-add-check-op="${op.id}" /></label>
+          <label>Monto<input type="number" min="0" step="0.01" data-add-check-field="monto" data-add-check-op="${op.id}" /></label>
+          <button type="button" class="small" data-add-check-submit="${op.id}" title="Agregar cheque">+</button>
+        </div>
         <button type="button" class="remove-btn small" style="margin-top:10px" data-delete-op="${op.id}">Borrar OP</button>
+        <p class="legend">"Borrar OP" borra la orden completa con todos sus cheques — para corregir un cheque puntual, usá el botón "Borrar" de esa fila y volvelo a cargar acá arriba.</p>
       </div>
     </div>`;
   }).join("");
@@ -1111,6 +1121,36 @@ document.body.addEventListener("click", (event) => {
     if (!confirm("¿Borrar esta Orden de Pago y sus cheques? Las facturas que cubría vuelven a quedar pendientes de cobro.")) return;
     state.paymentOrders = state.paymentOrders.filter((op) => op.id !== deleteOpId);
     state.checks = state.checks.filter((c) => c.paymentOrderId !== deleteOpId);
+    render();
+    return;
+  }
+  const deleteCheckId = event.target.dataset?.deleteCheck;
+  if (deleteCheckId) {
+    if (!confirm("¿Borrar este cheque? Podés volver a cargarlo con el formulario de abajo.")) return;
+    state.checks = state.checks.filter((c) => c.id !== deleteCheckId);
+    render();
+    return;
+  }
+  const addCheckOpId = event.target.dataset?.addCheckSubmit;
+  if (addCheckOpId) {
+    const fields = {};
+    document.querySelectorAll(`[data-add-check-op="${addCheckOpId}"]`).forEach((input) => {
+      fields[input.dataset.addCheckField] = input.value;
+    });
+    if (!fields.monto || Number(fields.monto) <= 0) {
+      alert("Cargá al menos el monto del cheque.");
+      return;
+    }
+    state.checks.push({
+      id: cryptoId(),
+      paymentOrderId: addCheckOpId,
+      numero: fields.numero || "",
+      banco: fields.banco || "",
+      fechaEmision: fields.fechaEmision || "",
+      fechaPago: fields.fechaPago || "",
+      monto: Number(fields.monto || 0),
+      status: "RECIBIDO"
+    });
     render();
   }
 });
