@@ -88,6 +88,15 @@ const seed = {
   // deliveryIds: qué remitos puntuales cubre esta factura (trazabilidad real).
   // amountGross se calcula solo, sumando los remitos tildados.
   invoices: [],
+  // paymentOrders (Orden de Pago): agrupa N facturas de cliente de cualquier
+  // sala/semana, calcula retenciones sobre el total, y cuelgan de acá los
+  // cheques que cubren el neto a abonar. Ver checks abajo.
+  paymentOrders: [],
+  // checks: cuelgan de una paymentOrder. Indivisibles — o se depositan
+  // (ACREDITADO) o se endosan enteros a una factura de proveedor (Etapa 2,
+  // todavía no hay UI para eso, pero el estado ENDOSADO ya existe en el
+  // modelo para no tener que migrar de nuevo cuando lo armemos).
+  checks: [],
   expenses: [],
   openingBalance: 0
 };
@@ -223,7 +232,14 @@ async function loadState() {
 
 function hydrate(saved) {
   if (!saved || !Object.keys(saved).length) return structuredClone(seed);
-  const merged = { ...structuredClone(seed), ...saved, invoices: saved.invoices || [], expenses: saved.expenses || [] };
+  const merged = {
+    ...structuredClone(seed),
+    ...saved,
+    invoices: saved.invoices || [],
+    expenses: saved.expenses || [],
+    paymentOrders: saved.paymentOrders || [],
+    checks: saved.checks || []
+  };
   merged.priceRules = (merged.priceRules || []).map(migrateRuleToCommission);
   return merged;
 }
@@ -321,7 +337,7 @@ function byId(collection, id) {
 }
 
 function money(value) {
-  return new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 }).format(value || 0);
+  return new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(round2(value) || 0);
 }
 
 /**
@@ -532,6 +548,7 @@ function optionHtml(item) {
 }
 
 function render() {
+  syncClientInvoiceStatuses();
   renderOptions();
   renderDeliveries();
   renderRules();
@@ -542,6 +559,7 @@ function render() {
   renderBalancePanel();
   renderExpenses();
   renderMonthlyTable();
+  renderPagosTab();
   saveState();
 }
 
@@ -822,6 +840,281 @@ function renderBalancePanel() {
   $(selector).addEventListener("change", renderBalancePanel);
 });
 
+// ============ Pestaña Pagos (Ordenes de pago + cheques) ============
+
+// Cheques todavía no guardados, mientras se arma una OP nueva. Se resetea
+// después de guardar o al cambiar de cliente.
+let opDraftChecks = [];
+
+function opSelectedInvoiceIds() {
+  return [...document.querySelectorAll("#opInvoicePicker .op-invoice-check:checked")].map((el) => el.dataset.invoiceId);
+}
+
+function renderOpClientSelect() {
+  const select = $("#opClientId");
+  const prev = select.value;
+  select.innerHTML = `<option value="">Elegí...</option>` + state.clients.map(optionHtml).join("");
+  if (state.clients.some((c) => c.id === prev)) select.value = prev;
+}
+
+function renderOpInvoicePicker() {
+  const clientId = $("#opClientId").value;
+  const container = $("#opInvoicePicker");
+  if (!clientId) {
+    container.innerHTML = `<p class="picker-empty">Elegí un cliente para ver sus facturas pendientes de cobro.</p>`;
+    renderOpBreakdown();
+    return;
+  }
+  const candidates = pendingClientInvoicesForOP(clientId);
+  if (!candidates.length) {
+    container.innerHTML = `<p class="picker-empty">Este cliente no tiene facturas pendientes de cobro (o ya están todas en alguna OP).</p>`;
+    renderOpBreakdown();
+    return;
+  }
+  container.innerHTML = `<table class="picker-table">
+    <thead><tr><th></th><th>Sala</th><th>N Factura</th><th>Emisión</th><th class="num">Total c/IVA</th></tr></thead>
+    <tbody>
+      ${candidates.map((inv) => {
+        const loc = byId(state.locations, inv.locationId)?.name || "";
+        return `<tr>
+          <td><input type="checkbox" class="op-invoice-check" data-invoice-id="${inv.id}" /></td>
+          <td>${escapeHtml(loc)}</td>
+          <td>${escapeHtml(inv.number)}</td>
+          <td>${inv.issueDate}</td>
+          <td class="num">${money(inv.amountGross)}</td>
+        </tr>`;
+      }).join("")}
+    </tbody>
+  </table>`;
+  container.querySelectorAll(".op-invoice-check").forEach((el) => el.addEventListener("change", renderOpBreakdown));
+  renderOpBreakdown();
+}
+
+function draftOpBreakdown() {
+  const draftOp = {
+    invoiceIds: opSelectedInvoiceIds(),
+    ivaInvoiceRatePct: Number($("#opIvaRate").value || IVA_RATE * 100),
+    gananciasRatePct: Number($("#opGananciasRate").value || 0)
+  };
+  return opBreakdown(draftOp);
+}
+
+function renderOpBreakdown() {
+  const b = draftOpBreakdown();
+  $("#opBreakdown").innerHTML = `<div class="table-wrap small" style="max-height:none">
+    <table class="breakdown-table">
+      <tbody>
+        <tr><td>1. Total facturas tildadas (c/IVA)</td><td class="num">${money(b.totalGross)}</td></tr>
+        <tr><td>2. Neto s/IVA (÷ ${(1 + b.ivaInvoiceRatePct / 100).toFixed(2)})</td><td class="num">${money(b.netoSIva)}</td></tr>
+        <tr><td>3. Retención IVA (100% del IVA de la factura)</td><td class="num">−${money(b.retIva)}</td></tr>
+        <tr><td>4. Retención Ganancias (${b.gananciasRatePct ?? $("#opGananciasRate").value}% del neto)</td><td class="num">−${money(b.retGanancias)}</td></tr>
+        <tr class="total"><td>5. Neto a abonar</td><td class="num">${money(b.netoAAbonar)}</td></tr>
+      </tbody>
+    </table>
+  </div>`;
+  renderOpChequeSummary();
+}
+
+function renderOpChequeRows() {
+  const container = $("#opChequeRows");
+  if (!opDraftChecks.length) {
+    container.innerHTML = `<p class="picker-empty">Todavía no cargaste ningún cheque.</p>`;
+    return;
+  }
+  container.innerHTML = opDraftChecks.map((c, idx) => `
+    <div class="cheque-draft-row">
+      <label>N° cheque<input type="text" value="${escapeHtml(c.numero)}" data-op-cheque-field="numero" data-op-cheque-idx="${idx}" /></label>
+      <label>Banco<input type="text" value="${escapeHtml(c.banco)}" data-op-cheque-field="banco" data-op-cheque-idx="${idx}" /></label>
+      <label>Emisión<input type="date" value="${c.fechaEmision}" data-op-cheque-field="fechaEmision" data-op-cheque-idx="${idx}" /></label>
+      <label>Fecha pago<input type="date" value="${c.fechaPago}" data-op-cheque-field="fechaPago" data-op-cheque-idx="${idx}" /></label>
+      <label>Monto<input type="number" min="0" step="0.01" value="${c.monto}" data-op-cheque-field="monto" data-op-cheque-idx="${idx}" /></label>
+      <button type="button" class="remove-cheque-btn" data-remove-op-cheque="${idx}" title="Quitar">✕</button>
+    </div>`).join("");
+}
+
+function renderOpChequeSummary() {
+  const netoAAbonar = draftOpBreakdown().netoAAbonar;
+  const chequesTotal = round2(opDraftChecks.reduce((sum, c) => sum + Number(c.monto || 0), 0));
+  const diff = round2(netoAAbonar - chequesTotal);
+  const diffHtml = Math.abs(diff) < 0.01
+    ? `<span class="ok">Cierra exacto ✓</span>`
+    : diff > 0
+      ? `<span class="warn">Falta cubrir ${money(diff)}</span>`
+      : `<span class="warn">Te pasaste por ${money(-diff)} — revisá los montos</span>`;
+  $("#opChequeSummary").innerHTML = `<div class="summary-row" style="display:flex;gap:18px;flex-wrap:wrap;padding:8px 0;">
+    <span>Neto a abonar: <strong>${money(netoAAbonar)}</strong></span>
+    <span>Suma de cheques: <strong>${money(chequesTotal)}</strong></span>
+    ${diffHtml}
+  </div>`;
+}
+
+$("#opClientId").addEventListener("change", () => {
+  opDraftChecks = [];
+  renderOpInvoicePicker();
+  renderOpChequeRows();
+});
+["#opIvaRate", "#opGananciasRate"].forEach((sel) => $(sel).addEventListener("input", renderOpBreakdown));
+
+$("#opAddChequeBtn").addEventListener("click", () => {
+  opDraftChecks.push({ numero: "", banco: "", fechaEmision: "", fechaPago: "", monto: 0 });
+  renderOpChequeRows();
+  renderOpChequeSummary();
+});
+
+document.body.addEventListener("input", (event) => {
+  const idx = event.target.dataset?.opChequeIdx;
+  const field = event.target.dataset?.opChequeField;
+  if (idx === undefined || !field) return;
+  opDraftChecks[idx][field] = field === "monto" ? Number(event.target.value || 0) : event.target.value;
+  if (field === "monto") renderOpChequeSummary();
+});
+
+document.body.addEventListener("click", (event) => {
+  const removeIdx = event.target.dataset?.removeOpCheque;
+  if (removeIdx === undefined) return;
+  opDraftChecks.splice(Number(removeIdx), 1);
+  renderOpChequeRows();
+  renderOpChequeSummary();
+});
+
+$("#opForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const invoiceIds = opSelectedInvoiceIds();
+  if (!invoiceIds.length) {
+    alert("Tildá al menos una factura para armar la OP.");
+    return;
+  }
+  if (!opDraftChecks.length) {
+    alert("Cargá al menos un cheque antes de guardar.");
+    return;
+  }
+  const op = {
+    id: cryptoId(),
+    clientId: $("#opClientId").value,
+    number: $("#opNumber").value.trim(),
+    date: new Date().toISOString().slice(0, 10),
+    invoiceIds,
+    ivaInvoiceRatePct: Number($("#opIvaRate").value || IVA_RATE * 100),
+    gananciasRatePct: Number($("#opGananciasRate").value || 0)
+  };
+  state.paymentOrders.push(op);
+  opDraftChecks.forEach((c) => {
+    state.checks.push({
+      id: cryptoId(),
+      paymentOrderId: op.id,
+      numero: c.numero,
+      banco: c.banco,
+      fechaEmision: c.fechaEmision,
+      fechaPago: c.fechaPago,
+      monto: Number(c.monto || 0),
+      status: "RECIBIDO"
+    });
+  });
+  opDraftChecks = [];
+  $("#opForm").reset();
+  $("#opIvaRate").value = IVA_RATE * 100;
+  $("#opGananciasRate").value = 6;
+  render();
+});
+
+function renderOpList() {
+  const ops = [...state.paymentOrders].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  if (!ops.length) {
+    $("#opList").innerHTML = `<p class="legend">Todavía no armaste ninguna Orden de Pago.</p>`;
+    return;
+  }
+  $("#opList").innerHTML = ops.map((op) => {
+    const clientName = byId(state.clients, op.clientId)?.name || "";
+    const invoices = opInvoices(op);
+    const checks = opChecks(op);
+    const b = opBreakdown(op);
+    const resolved = opIsFullyResolved(op);
+    const statusBadge = resolved
+      ? `<span class="status PAGO">CERRADA</span>`
+      : `<span class="status PENDIENTE">${checks.filter((c) => !checkIsResolved(c)).length} cheque(s) pendiente(s)</span>`;
+    const chips = invoices.map((inv) => {
+      const loc = byId(state.locations, inv.locationId)?.name || "";
+      return `<span class="chip">${escapeHtml(loc)} ${escapeHtml(inv.number)}</span>`;
+    }).join("");
+    const checkRows = checks.map((c) => `<tr>
+        <td>${escapeHtml(c.numero || "-")}</td>
+        <td>${escapeHtml(c.banco || "-")}</td>
+        <td>${c.fechaPago || "-"}</td>
+        <td class="num">${money(c.monto)}</td>
+        <td><span class="status ${c.status}">${c.status}</span></td>
+        <td>
+          ${c.status === "RECIBIDO" ? `<button type="button" class="small" data-check-acreditado="${c.id}">Marcar acreditado</button> <button type="button" class="small" data-check-rechazado="${c.id}">Marcar rechazado</button>` : ""}
+        </td>
+      </tr>`).join("");
+    return `<div class="op-card">
+      <div class="op-header" data-toggle-op="${op.id}">
+        <div><strong>OP ${escapeHtml(op.number || op.id)}</strong> · ${escapeHtml(clientName)} · ${op.date}
+          <span class="tag">${invoices.length} factura(s)</span>
+        </div>
+        <div>${statusBadge}</div>
+      </div>
+      <div class="op-detail" id="op-detail-${op.id}">
+        <p class="legend">Facturas cubiertas:</p>
+        ${chips}
+        <table class="breakdown-table" style="margin-top:10px">
+          <tbody>
+            <tr><td>Total facturas c/IVA</td><td class="num">${money(b.totalGross)}</td></tr>
+            <tr><td>Ret. IVA</td><td class="num">−${money(b.retIva)}</td></tr>
+            <tr><td>Ret. Ganancias</td><td class="num">−${money(b.retGanancias)}</td></tr>
+            <tr class="total"><td>Neto a abonar</td><td class="num">${money(b.netoAAbonar)}</td></tr>
+          </tbody>
+        </table>
+        <table style="margin-top:10px">
+          <thead><tr><th>Cheque</th><th>Banco</th><th>Fecha pago</th><th class="num">Monto</th><th>Estado</th><th></th></tr></thead>
+          <tbody>${checkRows}</tbody>
+        </table>
+        <button type="button" class="remove-btn small" style="margin-top:10px" data-delete-op="${op.id}">Borrar OP</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function renderPagosTab() {
+  renderOpClientSelect();
+  renderOpInvoicePicker();
+  renderOpChequeRows();
+  renderOpChequeSummary();
+  renderOpList();
+}
+
+document.body.addEventListener("click", (event) => {
+  const toggleId = event.target.closest("[data-toggle-op]")?.dataset.toggleOp;
+  if (toggleId) {
+    $(`#op-detail-${toggleId}`).classList.toggle("open");
+    return;
+  }
+  const acreditarId = event.target.dataset?.checkAcreditado;
+  if (acreditarId) {
+    const check = byId(state.checks, acreditarId);
+    if (check) {
+      check.status = "ACREDITADO";
+      render();
+    }
+    return;
+  }
+  const rechazarId = event.target.dataset?.checkRechazado;
+  if (rechazarId) {
+    const check = byId(state.checks, rechazarId);
+    if (check) {
+      check.status = "RECHAZADO";
+      render();
+    }
+    return;
+  }
+  const deleteOpId = event.target.dataset?.deleteOp;
+  if (deleteOpId) {
+    if (!confirm("¿Borrar esta Orden de Pago y sus cheques? Las facturas que cubría vuelven a quedar pendientes de cobro.")) return;
+    state.paymentOrders = state.paymentOrders.filter((op) => op.id !== deleteOpId);
+    state.checks = state.checks.filter((c) => c.paymentOrderId !== deleteOpId);
+    render();
+  }
+});
+
 function renderExpenses() {
   const rows = [...state.expenses].sort((a, b) => b.date.localeCompare(a.date));
   $("#expenseRows").innerHTML = rows.length ? `<tr><th>Fecha</th><th>Categoría</th><th>Descripción</th><th class="num">Monto</th><th></th></tr>
@@ -1005,15 +1298,24 @@ function invoiceRowData(item) {
   const entity = item.type === "client"
     ? byId(state.clients, item.clientId)?.name || ""
     : byId(state.providers, item.providerId)?.name || "";
-  const location = item.locationId ? byId(state.locations, item.locationId)?.name || "" : "";
+  const distinctLocations = [...new Set((item.deliveryIds || []).map((id) => byId(state.deliveries, id)?.locationId).filter(Boolean))];
+  const location = item.locationId
+    ? byId(state.locations, item.locationId)?.name || ""
+    : distinctLocations.length > 1
+      ? `Varias salas (${distinctLocations.length})`
+      : distinctLocations.length === 1
+        ? byId(state.locations, distinctLocations[0])?.name || ""
+        : "";
   const retIva = Number(item.retIva || 0);
   const retGan = Number(item.retGanancias || 0);
+  const op = item.type === "client" ? clientInvoiceOP(item.id) : null;
   return {
     ...item,
     entity,
     location,
     neto: Number(item.amountGross || 0) - retIva - retGan,
-    deliveryCount: (item.deliveryIds || []).length
+    deliveryCount: (item.deliveryIds || []).length,
+    op
   };
 }
 
@@ -1038,6 +1340,117 @@ function sortArrow(field) {
   return invoiceSort.dir === "asc" ? " ▲" : " ▼";
 }
 
+/** IDs de facturas de cliente ya metidas en alguna OP (para no ofrecerlas dos veces). */
+function invoicesLinkedToSomeOP() {
+  const set = new Set();
+  state.paymentOrders.forEach((op) => (op.invoiceIds || []).forEach((id) => set.add(id)));
+  return set;
+}
+
+/** Facturas de cliente candidatas a entrar en una OP nueva: de ESE cliente, sin OP todavía. */
+function pendingClientInvoicesForOP(clientId) {
+  const linked = invoicesLinkedToSomeOP();
+  return state.invoices
+    .filter((inv) => inv.type === "client" && inv.clientId === clientId && !linked.has(inv.id))
+    .sort((a, b) => a.issueDate.localeCompare(b.issueDate));
+}
+
+function opInvoices(op) {
+  return (op.invoiceIds || []).map((id) => byId(state.invoices, id)).filter(Boolean);
+}
+
+function opTotalGross(op) {
+  return round2(opInvoices(op).reduce((sum, inv) => sum + Number(inv.amountGross || 0), 0));
+}
+
+/**
+ * Desglose completo de una OP, paso a paso, en el mismo orden que se le
+ * explicó a Yamila: total c/IVA -> neto s/IVA (usando la alícuota de IVA de
+ * TUS facturas, normalmente 21%) -> retención IVA (siempre el 100% de ese
+ * componente de IVA — no es una tasa aparte, es el IVA que ya venía adentro
+ * de la factura) -> retención Ganancias (% sobre el neto, NUNCA sobre el
+ * total c/IVA) -> neto a abonar. Si la OP tiene retenciones cargadas a mano
+ * (manualRetIva/manualRetGanancias — por ejemplo una OP vieja donde no
+ * sabemos la tasa real), se usan esas en vez de recalcular con el %.
+ */
+function opBreakdown(op) {
+  const totalGross = opTotalGross(op);
+  const ivaInvoiceRatePct = Number(op.ivaInvoiceRatePct ?? IVA_RATE * 100);
+  const netoSIva = round2(totalGross / (1 + ivaInvoiceRatePct / 100));
+  const ivaComponent = round2(totalGross - netoSIva);
+  let retIva, retGanancias;
+  if (op.manualRetIva !== undefined || op.manualRetGanancias !== undefined) {
+    retIva = round2(Number(op.manualRetIva || 0));
+    retGanancias = round2(Number(op.manualRetGanancias || 0));
+  } else {
+    retIva = ivaComponent; // se retiene el 100% del IVA de la factura, siempre
+    retGanancias = round2(netoSIva * (Number(op.gananciasRatePct ?? 6) / 100));
+  }
+  const netoAAbonar = round2(totalGross - retIva - retGanancias);
+  return { totalGross, netoSIva, ivaComponent, retIva, retGanancias, netoAAbonar, ivaInvoiceRatePct };
+}
+
+function opChecks(op) {
+  return state.checks.filter((c) => c.paymentOrderId === op.id);
+}
+
+function opChecksTotal(op) {
+  return round2(opChecks(op).reduce((sum, c) => sum + Number(c.monto || 0), 0));
+}
+
+/**
+ * Un cheque "resuelto" es uno que ya no puede volver a moverse: se depositó
+ * (ACREDITADO) o se endosó (ENDOSADO — todavía sin UI, Etapa 2). RECIBIDO y
+ * RECHAZADO no cuentan como resueltos: el primero todavía puede pasar a
+ * cualquier lado, el segundo directamente no sirvió.
+ *
+ * OJO Etapa 2: cuando se implemente el endoso, el reporte de Caja Real
+ * (Liquidez) va a tener que sumar SOLO los cheques ACREDITADO como cobro
+ * real de banco — un cheque ENDOSADO nunca tocó la cuenta de Hojaldra, así
+ * que no puede contar como plata cobrada aunque la factura ya esté resuelta.
+ * Por ahora todos los cheques se resuelven vía ACREDITADO nomás, así que
+ * esa distinción todavía no hace falta en los cálculos de caja.
+ */
+function checkIsResolved(check) {
+  return check.status === "ACREDITADO" || check.status === "ENDOSADO";
+}
+
+function opIsFullyResolved(op) {
+  const checks = opChecks(op);
+  if (!checks.length) return false;
+  const allResolved = checks.every(checkIsResolved);
+  const closeEnough = Math.abs(opChecksTotal(op) - opBreakdown(op).netoAAbonar) < 1;
+  return allResolved && closeEnough;
+}
+
+function clientInvoiceOP(invoiceId) {
+  return state.paymentOrders.find((op) => (op.invoiceIds || []).includes(invoiceId));
+}
+
+/**
+ * El estado de una factura de CLIENTE ya no se tipea a mano — se deriva de
+ * su OP. Esto corre al principio de cada render() para que todo lo que ya
+ * existía (reportes, Liquidez, deliveryStatus) siga funcionando igual sin
+ * tener que reescribirlo: simplemente el campo status se mantiene
+ * actualizado solo, en vez de que lo cambie un botón.
+ */
+function syncClientInvoiceStatuses() {
+  state.invoices.forEach((inv) => {
+    if (inv.type !== "client") return;
+    const op = clientInvoiceOP(inv.id);
+    if (!op) {
+      inv.status = "PENDIENTE";
+      return;
+    }
+    const resolved = opIsFullyResolved(op);
+    inv.status = resolved ? "PAGO" : "PENDIENTE";
+    if (resolved && !inv.paymentDate) {
+      const fechas = opChecks(op).map((c) => c.fechaPago).filter(Boolean).sort();
+      inv.paymentDate = fechas[fechas.length - 1] || inv.paymentDate || "";
+    }
+  });
+}
+
 function renderInvoices() {
   const rows = sortInvoiceRows((state.invoices || []).map(invoiceRowData));
 
@@ -1057,20 +1470,19 @@ function renderInvoices() {
     const retIva = Number(item.retIva || 0);
     const retGan = Number(item.retGanancias || 0);
     const neto = Number(item.amountGross || 0) - retIva - retGan;
-    const retCell = item.type === "client"
-      ? `<input type="number" min="0" step="0.01" placeholder="Ret. IVA" value="${item.retIva || ""}" data-ret-iva="${item.id}" class="ret-input" />
-         <input type="number" min="0" step="0.01" placeholder="Ret. Ganancias" value="${item.retGanancias || ""}" data-ret-ganancias="${item.id}" class="ret-input" />`
-      : `<span class="cell-sub">-</span>`;
-    const chequeGuardado = item.chequeNumero || item.chequeFechaRecepcion;
+    const retCell = `<span class="cell-sub">-</span>`;
     const chequeCell = item.type === "client"
-      ? `<div class="cheque-field">
-           <input type="text" placeholder="N° cheque" value="${item.chequeNumero || ""}" data-cheque-numero="${item.id}" class="ret-input" />
-           <input type="date" title="Fecha de recepción del cheque" value="${item.chequeFechaRecepcion || ""}" data-cheque-fecha="${item.id}" class="ret-input" />
-           <input type="text" placeholder="N° orden de pago (si mandan)" value="${item.ordenPago || ""}" data-orden-pago="${item.id}" class="ret-input" />
-           <button type="button" data-save-cheque="${item.id}" class="edit-btn">Guardar cheque / OP</button>
-           ${chequeGuardado ? `<span class="save-ok">✓ guardado</span>` : ""}
-         </div>`
+      ? (item.op
+          ? `<span class="cell-sub">OP ${escapeHtml(item.op.number || item.op.id)}</span>`
+          : `<span class="cell-sub">Sin OP todavía</span>`)
       : `<span class="cell-sub">-</span>`;
+    const pagoCell = item.type === "client"
+      ? `<span class="cell-sub">${item.paymentDate || "-"}</span>`
+      : `<input type="date" value="${item.paymentDate || ""}" data-payment-date="${item.id}" />`;
+    const actionsCell = item.type === "client"
+      ? `<button type="button" data-delete-invoice="${item.id}" title="Eliminar">Borrar</button>`
+      : `<button type="button" data-save-payment="${item.id}" title="Guardar pago">Pago</button>
+         <button type="button" data-delete-invoice="${item.id}" title="Eliminar">Borrar</button>`;
     return `<tr>
       <td>${item.type === "client" ? "Cliente" : "Proveedor"}</td>
       <td>${escapeHtml(entity)}</td>
@@ -1080,14 +1492,11 @@ function renderInvoices() {
       <td>${nDeliveries} remito(s)</td>
       <td>${retCell}</td>
       <td>${chequeCell}</td>
-      <td><input type="date" value="${item.paymentDate || ""}" data-payment-date="${item.id}" /></td>
+      <td>${pagoCell}</td>
       <td class="num">${money(item.amountGross)}</td>
       <td class="num">${money(neto)}</td>
       <td><span class="status ${item.status}">${item.status}</span></td>
-      <td>
-        <button type="button" data-save-payment="${item.id}" title="Guardar pago">Pago</button>
-        <button type="button" data-delete-invoice="${item.id}" title="Eliminar">Borrar</button>
-      </td>
+      <td>${actionsCell}</td>
     </tr>`;
   }).join("");
 }
@@ -1209,7 +1618,7 @@ function renderInvoicePickers() {
     containerSelector: "#providerInvoicePicker",
     totalSelector: "#providerInvoiceTotal",
     form: $("#providerInvoiceForm"),
-    getCandidates: (data) => data.clientId && data.locationId && data.providerId
+    getCandidates: (data) => data.clientId && data.providerId
       ? candidateDeliveries({ clientId: data.clientId, locationId: data.locationId, providerId: data.providerId, mode: "provider" })
       : [],
     valueFn: (t) => t.providerNet,
@@ -1471,23 +1880,10 @@ document.body.addEventListener("click", (event) => {
   const invoiceId = event.target.dataset?.deleteInvoice;
   const paymentId = event.target.dataset?.savePayment;
   const expenseId = event.target.dataset?.deleteExpense;
-  const chequeId = event.target.dataset?.saveCheque;
   const noteId = event.target.dataset?.viewNote;
   if (noteId) {
     const item = byId(state.deliveries, noteId);
     if (item?.note) alert(`Nota del remito ${item.receiptNo}:\n\n${item.note}`);
-  }
-  if (chequeId) {
-    const invoiceItem = state.invoices.find((item) => item.id === chequeId);
-    const numeroInput = document.querySelector(`input[data-cheque-numero="${chequeId}"]`);
-    const fechaInput = document.querySelector(`input[data-cheque-fecha="${chequeId}"]`);
-    const ordenPagoInput = document.querySelector(`input[data-orden-pago="${chequeId}"]`);
-    if (invoiceItem) {
-      invoiceItem.chequeNumero = numeroInput?.value || "";
-      invoiceItem.chequeFechaRecepcion = fechaInput?.value || "";
-      invoiceItem.ordenPago = ordenPagoInput?.value || "";
-      render();
-    }
   }
   if (expenseId) {
     state.expenses = state.expenses.filter((item) => item.id !== expenseId);
@@ -1506,19 +1902,19 @@ document.body.addEventListener("click", (event) => {
     render();
   }
   if (invoiceId) {
+    if (clientInvoiceOP(invoiceId)) {
+      alert("Esta factura ya está vinculada a una Orden de Pago — primero borrala (o sacala) desde la pestaña Pagos.");
+      return;
+    }
     state.invoices = state.invoices.filter((item) => item.id !== invoiceId);
     render();
   }
   if (paymentId) {
     const invoiceItem = state.invoices.find((item) => item.id === paymentId);
     const input = document.querySelector(`input[data-payment-date="${paymentId}"]`);
-    const retIvaInput = document.querySelector(`input[data-ret-iva="${paymentId}"]`);
-    const retGanInput = document.querySelector(`input[data-ret-ganancias="${paymentId}"]`);
     if (invoiceItem && input?.value) {
       invoiceItem.paymentDate = input.value;
       invoiceItem.status = "PAGO";
-      if (retIvaInput) invoiceItem.retIva = Number(retIvaInput.value || 0);
-      if (retGanInput) invoiceItem.retGanancias = Number(retGanInput.value || 0);
       render();
     }
   }

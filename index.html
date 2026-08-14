@@ -64,6 +64,7 @@
         <button data-tab="rules" type="button">Precios</button>
         <button data-tab="reports" type="button">Reportes</button>
         <button data-tab="invoices" type="button">Facturas</button>
+        <button data-tab="pagos" type="button">Pagos</button>
         <button data-tab="liquidez" type="button">Liquidez</button>
         <button data-tab="catalogs" type="button">Maestros</button>
       </nav>
@@ -268,7 +269,7 @@
           <form id="providerInvoiceForm">
             <h2>Factura proveedor</h2>
             <label>Cliente<select name="clientId" required></select></label>
-            <label>Sala<select name="locationId" required></select></label>
+            <label>Sala <span class="cell-sub" style="text-transform:none">(opcional, para consolidar varias salas)</span><select name="locationId"></select></label>
             <label>Proveedor<select name="providerId" required></select></label>
             <label>N Factura<input name="number" required /></label>
             <label>Recepcion<input name="issueDate" type="date" required /></label>
@@ -294,6 +295,41 @@
           <table>
             <tbody id="invoiceRows"></tbody>
           </table>
+        </div>
+      </section>
+
+      <section id="pagos" class="panel">
+        <form id="opForm">
+          <h2>1. Armar una Orden de Pago</h2>
+          <div class="toolbar" style="grid-template-columns: 1fr 1fr;">
+            <label>Cliente<select id="opClientId" required></select></label>
+            <label>N Orden de Pago (opcional)<input id="opNumber" type="text" /></label>
+          </div>
+
+          <p class="legend">Tildá las facturas de cliente pendientes de cobro — de cualquier sala y cualquier semana.</p>
+          <div id="opInvoicePicker" class="picker"></div>
+
+          <div class="toolbar" style="grid-template-columns: 1fr 1fr; margin-top:12px;">
+            <label>Alícuota IVA de tus facturas (%)<input id="opIvaRate" type="number" min="0" max="100" step="0.01" value="21" /></label>
+            <label>% Retención Ganancias (sobre el neto s/IVA)<input id="opGananciasRate" type="number" min="0" max="100" step="0.01" value="6" /></label>
+          </div>
+
+          <div id="opBreakdown"></div>
+
+          <h2>2. Cargar cheques hasta cerrar el neto a abonar</h2>
+          <div id="opChequeRows"></div>
+          <button type="button" id="opAddChequeBtn">+ Agregar cheque</button>
+          <div id="opChequeSummary"></div>
+
+          <div style="margin-top:14px;">
+            <button type="submit">Guardar orden de pago</button>
+          </div>
+        </form>
+
+        <div>
+          <h2 style="margin-top:18px">3. Ordenes de pago registradas</h2>
+          <p class="legend">Click en una para ver el detalle de facturas y cheques.</p>
+          <div id="opList"></div>
         </div>
       </section>
 
