@@ -319,9 +319,13 @@
       <section id="pagos" class="panel">
         <form id="opForm">
           <h2>1. Armar una Orden de Pago</h2>
-          <div class="toolbar" style="grid-template-columns: 1fr 1fr;">
+          <div class="toolbar" style="grid-template-columns: 1fr 1fr 1fr;">
             <label>Cliente<select id="opClientId" required></select></label>
             <label>N Orden de Pago (opcional)<input id="opNumber" type="text" /></label>
+            <label>Método de pago<select id="opMetodo">
+                <option value="CHEQUE">Cheque</option>
+                <option value="TRANSFERENCIA">Transferencia</option>
+              </select></label>
           </div>
 
           <p class="legend">Tildá las facturas de cliente pendientes de cobro — de cualquier sala y cualquier semana.</p>
@@ -334,7 +338,7 @@
 
           <div id="opBreakdown"></div>
 
-          <h2>2. Cargar cheques hasta cerrar el neto a abonar</h2>
+          <h2 id="opChequeSectionTitle">2. Cargar cheques hasta cerrar el neto a abonar</h2>
           <div id="opChequeRows"></div>
           <button type="button" id="opAddChequeBtn">+ Agregar cheque</button>
           <div id="opChequeSummary"></div>

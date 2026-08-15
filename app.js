@@ -1184,9 +1184,24 @@ function renderOpBreakdown() {
 }
 
 function renderOpChequeRows() {
+  const metodo = $("#opMetodo").value;
+  $("#opChequeSectionTitle").textContent = metodo === "TRANSFERENCIA"
+    ? "2. Cargar transferencias hasta cerrar el neto a abonar"
+    : "2. Cargar cheques hasta cerrar el neto a abonar";
+  $("#opAddChequeBtn").textContent = metodo === "TRANSFERENCIA" ? "+ Agregar transferencia" : "+ Agregar cheque";
+
   const container = $("#opChequeRows");
   if (!opDraftChecks.length) {
-    container.innerHTML = `<p class="picker-empty">Todavía no cargaste ningún cheque.</p>`;
+    container.innerHTML = `<p class="picker-empty">${metodo === "TRANSFERENCIA" ? "Todavía no cargaste ninguna transferencia." : "Todavía no cargaste ningún cheque."}</p>`;
+    return;
+  }
+  if (metodo === "TRANSFERENCIA") {
+    container.innerHTML = opDraftChecks.map((c, idx) => `
+      <div class="cheque-draft-row" style="grid-template-columns: 1fr 1fr 34px;">
+        <label>Fecha<input type="date" value="${c.fechaPago}" data-op-cheque-field="fechaPago" data-op-cheque-idx="${idx}" /></label>
+        <label>Monto<input type="number" min="0" step="0.01" value="${c.monto}" data-op-cheque-field="monto" data-op-cheque-idx="${idx}" /></label>
+        <button type="button" class="remove-cheque-btn" data-remove-op-cheque="${idx}" title="Quitar">✕</button>
+      </div>`).join("");
     return;
   }
   container.innerHTML = opDraftChecks.map((c, idx) => `
@@ -1209,9 +1224,10 @@ function renderOpChequeSummary() {
     : diff > 0
       ? `<span class="warn">Falta cubrir ${money(diff)}</span>`
       : `<span class="warn">Te pasaste por ${money(-diff)} — revisá los montos</span>`;
+  const metodoLabel = $("#opMetodo").value === "TRANSFERENCIA" ? "Suma de transferencias" : "Suma de cheques";
   $("#opChequeSummary").innerHTML = `<div class="summary-row" style="display:flex;gap:18px;flex-wrap:wrap;padding:8px 0;">
     <span>Neto a abonar: <strong>${money(netoAAbonar)}</strong></span>
-    <span>Suma de cheques: <strong>${money(chequesTotal)}</strong></span>
+    <span>${metodoLabel}: <strong>${money(chequesTotal)}</strong></span>
     ${diffHtml}
   </div>`;
 }
@@ -1221,10 +1237,18 @@ $("#opClientId").addEventListener("change", () => {
   renderOpInvoicePicker();
   renderOpChequeRows();
 });
+$("#opMetodo").addEventListener("change", () => {
+  opDraftChecks = [];
+  renderOpChequeRows();
+  renderOpChequeSummary();
+});
 ["#opIvaRate", "#opGananciasRate"].forEach((sel) => $(sel).addEventListener("input", renderOpBreakdown));
 
 $("#opAddChequeBtn").addEventListener("click", () => {
-  opDraftChecks.push({ numero: "", banco: "", fechaEmision: "", fechaPago: "", monto: 0 });
+  const draft = $("#opMetodo").value === "TRANSFERENCIA"
+    ? { fechaPago: "", monto: 0 }
+    : { numero: "", banco: "", fechaEmision: "", fechaPago: "", monto: 0 };
+  opDraftChecks.push(draft);
   renderOpChequeRows();
   renderOpChequeSummary();
 });
@@ -1248,12 +1272,13 @@ document.body.addEventListener("click", (event) => {
 $("#opForm").addEventListener("submit", (event) => {
   event.preventDefault();
   const invoiceIds = opSelectedInvoiceIds();
+  const metodo = $("#opMetodo").value;
   if (!invoiceIds.length) {
     alert("Tildá al menos una factura para armar la OP.");
     return;
   }
   if (!opDraftChecks.length) {
-    alert("Cargá al menos un cheque antes de guardar.");
+    alert(metodo === "TRANSFERENCIA" ? "Cargá al menos una transferencia antes de guardar." : "Cargá al menos un cheque antes de guardar.");
     return;
   }
   const op = {
@@ -1262,6 +1287,7 @@ $("#opForm").addEventListener("submit", (event) => {
     number: $("#opNumber").value.trim(),
     date: new Date().toISOString().slice(0, 10),
     invoiceIds,
+    metodo,
     ivaInvoiceRatePct: Number($("#opIvaRate").value || IVA_RATE * 100),
     gananciasRatePct: Number($("#opGananciasRate").value || 0)
   };
@@ -1270,18 +1296,22 @@ $("#opForm").addEventListener("submit", (event) => {
     state.checks.push({
       id: cryptoId(),
       paymentOrderId: op.id,
-      numero: c.numero,
-      banco: c.banco,
-      fechaEmision: c.fechaEmision,
+      metodo,
+      numero: c.numero || "",
+      banco: c.banco || "",
+      fechaEmision: c.fechaEmision || "",
       fechaPago: c.fechaPago,
       monto: Number(c.monto || 0),
-      status: "RECIBIDO"
+      // Las transferencias se dan por confirmadas al cargarlas (no rebotan).
+      // Los cheques arrancan RECIBIDO y hay que marcarlos ACREDITADO a mano.
+      status: metodo === "TRANSFERENCIA" ? "ACREDITADO" : "RECIBIDO"
     });
   });
   opDraftChecks = [];
   $("#opForm").reset();
   $("#opIvaRate").value = IVA_RATE * 100;
   $("#opGananciasRate").value = 6;
+  renderOpChequeRows();
   render();
 });
 
@@ -1305,8 +1335,8 @@ function renderOpList() {
       return `<span class="chip">${escapeHtml(loc)} ${escapeHtml(inv.number)}</span>`;
     }).join("");
     const checkRows = checks.map((c) => `<tr>
-        <td>${escapeHtml(c.numero || "-")}</td>
-        <td>${escapeHtml(c.banco || "-")}</td>
+        <td>${c.metodo === "TRANSFERENCIA" ? "Transferencia" : escapeHtml(c.numero || "-")}</td>
+        <td>${c.metodo === "TRANSFERENCIA" ? "-" : escapeHtml(c.banco || "-")}</td>
         <td>${c.fechaPago || "-"}</td>
         <td class="num">${money(c.monto)}</td>
         <td><span class="status ${c.status}">${c.status}</span></td>
@@ -1315,10 +1345,24 @@ function renderOpList() {
           <button type="button" class="small remove-btn" data-delete-check="${c.id}" title="Borrar este cheque">Borrar</button>
         </td>
       </tr>`).join("");
+    const addRowHtml = op.metodo === "TRANSFERENCIA"
+      ? `<div class="cheque-draft-row" style="margin-top:10px; grid-template-columns: 1fr 1fr 34px;">
+          <label>Fecha<input type="date" data-add-check-field="fechaPago" data-add-check-op="${op.id}" /></label>
+          <label>Monto<input type="number" min="0" step="0.01" data-add-check-field="monto" data-add-check-op="${op.id}" /></label>
+          <button type="button" class="small" data-add-check-submit="${op.id}" title="Agregar transferencia">+</button>
+        </div>`
+      : `<div class="cheque-draft-row" style="margin-top:10px">
+          <label>N° cheque<input type="text" data-add-check-field="numero" data-add-check-op="${op.id}" /></label>
+          <label>Banco<input type="text" data-add-check-field="banco" data-add-check-op="${op.id}" /></label>
+          <label>Emisión<input type="date" data-add-check-field="fechaEmision" data-add-check-op="${op.id}" /></label>
+          <label>Fecha pago<input type="date" data-add-check-field="fechaPago" data-add-check-op="${op.id}" /></label>
+          <label>Monto<input type="number" min="0" step="0.01" data-add-check-field="monto" data-add-check-op="${op.id}" /></label>
+          <button type="button" class="small" data-add-check-submit="${op.id}" title="Agregar cheque">+</button>
+        </div>`;
     return `<div class="op-card">
       <div class="op-header" data-toggle-op="${op.id}">
         <div><strong>OP ${escapeHtml(op.number || op.id)}</strong> · ${escapeHtml(clientName)} · ${op.date}
-          <span class="tag">${invoices.length} factura(s)</span>
+          <span class="tag">${invoices.length} factura(s) · ${op.metodo === "TRANSFERENCIA" ? "Transferencia" : "Cheque"}</span>
         </div>
         <div>${statusBadge}</div>
       </div>
@@ -1334,19 +1378,12 @@ function renderOpList() {
           </tbody>
         </table>
         <table style="margin-top:10px">
-          <thead><tr><th>Cheque</th><th>Banco</th><th>Fecha pago</th><th class="num">Monto</th><th>Estado</th><th></th></tr></thead>
+          <thead><tr><th>${op.metodo === "TRANSFERENCIA" ? "Instrumento" : "Cheque"}</th><th>Banco</th><th>Fecha pago</th><th class="num">Monto</th><th>Estado</th><th></th></tr></thead>
           <tbody>${checkRows}</tbody>
         </table>
-        <div class="cheque-draft-row" style="margin-top:10px">
-          <label>N° cheque<input type="text" data-add-check-field="numero" data-add-check-op="${op.id}" /></label>
-          <label>Banco<input type="text" data-add-check-field="banco" data-add-check-op="${op.id}" /></label>
-          <label>Emisión<input type="date" data-add-check-field="fechaEmision" data-add-check-op="${op.id}" /></label>
-          <label>Fecha pago<input type="date" data-add-check-field="fechaPago" data-add-check-op="${op.id}" /></label>
-          <label>Monto<input type="number" min="0" step="0.01" data-add-check-field="monto" data-add-check-op="${op.id}" /></label>
-          <button type="button" class="small" data-add-check-submit="${op.id}" title="Agregar cheque">+</button>
-        </div>
+        ${addRowHtml}
         <button type="button" class="remove-btn small" style="margin-top:10px" data-delete-op="${op.id}">Borrar OP</button>
-        <p class="legend">"Borrar OP" borra la orden completa con todos sus cheques — para corregir un cheque puntual, usá el botón "Borrar" de esa fila y volvelo a cargar acá arriba.</p>
+        <p class="legend">"Borrar OP" borra la orden completa con todos sus ${op.metodo === "TRANSFERENCIA" ? "transferencias" : "cheques"} — para corregir uno puntual, usá el botón "Borrar" de esa fila y volvelo a cargar acá arriba.</p>
       </div>
     </div>`;
   }).join("");
@@ -1401,23 +1438,26 @@ document.body.addEventListener("click", (event) => {
   }
   const addCheckOpId = event.target.dataset?.addCheckSubmit;
   if (addCheckOpId) {
+    const op = byId(state.paymentOrders, addCheckOpId);
+    const metodo = op?.metodo === "TRANSFERENCIA" ? "TRANSFERENCIA" : "CHEQUE";
     const fields = {};
     document.querySelectorAll(`[data-add-check-op="${addCheckOpId}"]`).forEach((input) => {
       fields[input.dataset.addCheckField] = input.value;
     });
     if (!fields.monto || Number(fields.monto) <= 0) {
-      alert("Cargá al menos el monto del cheque.");
+      alert(metodo === "TRANSFERENCIA" ? "Cargá al menos el monto de la transferencia." : "Cargá al menos el monto del cheque.");
       return;
     }
     state.checks.push({
       id: cryptoId(),
       paymentOrderId: addCheckOpId,
+      metodo,
       numero: fields.numero || "",
       banco: fields.banco || "",
       fechaEmision: fields.fechaEmision || "",
       fechaPago: fields.fechaPago || "",
       monto: Number(fields.monto || 0),
-      status: "RECIBIDO"
+      status: metodo === "TRANSFERENCIA" ? "ACREDITADO" : "RECIBIDO"
     });
     render();
   }
