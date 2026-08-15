@@ -93,10 +93,18 @@ const seed = {
   // cheques que cubren el neto a abonar. Ver checks abajo.
   paymentOrders: [],
   // checks: cuelgan de una paymentOrder. Indivisibles — o se depositan
-  // (ACREDITADO) o se endosan enteros a una factura de proveedor (Etapa 2,
-  // todavía no hay UI para eso, pero el estado ENDOSADO ya existe en el
-  // modelo para no tener que migrar de nuevo cuando lo armemos).
+  // (ACREDITADO, plata real en el banco) o se endosan enteros a una o más
+  // facturas de proveedor (ENDOSADO — nunca tocan la cuenta de Hojaldra,
+  // van directo del cliente que las emitió al proveedor). providerInvoiceIds
+  // guarda a qué factura(s) de proveedor quedó aplicado un cheque endosado.
   checks: [],
+  // directPayments: pagos en efectivo/transferencia registrados a mano para
+  // cerrar una factura de proveedor — ya sea el pago completo (proveedor
+  // sin endoso) o el complemento que falta después de endosar cheques
+  // (ver providerInvoiceCoverage). Es la única plata que Liquidez cuenta
+  // como "Pagado a prov. real", junto con los cheques ACREDITADO del lado
+  // de cobros.
+  directPayments: [],
   expenses: [],
   openingBalance: 0
 };
@@ -238,7 +246,8 @@ function hydrate(saved) {
     invoices: saved.invoices || [],
     expenses: saved.expenses || [],
     paymentOrders: saved.paymentOrders || [],
-    checks: saved.checks || []
+    checks: saved.checks || [],
+    directPayments: saved.directPayments || []
   };
   merged.priceRules = (merged.priceRules || []).map(migrateRuleToCommission);
   return merged;
@@ -1346,7 +1355,7 @@ function renderOpList() {
         <td>${c.metodo === "TRANSFERENCIA" ? "-" : escapeHtml(c.banco || "-")}</td>
         <td>${c.fechaPago || "-"}</td>
         <td class="num">${money(c.monto)}</td>
-        <td><span class="status ${c.status}">${c.status}</span></td>
+        <td><span class="status ${c.status}">${c.status}</span>${c.status === "ENDOSADO" ? (checksEndorsedInvoiceLabel(c)) : ""}</td>
         <td>
           ${c.status === "RECIBIDO" ? `<button type="button" class="small" data-check-acreditado="${c.id}">Marcar acreditado</button> <button type="button" class="small" data-check-rechazado="${c.id}">Marcar rechazado</button>` : ""}
           <button type="button" class="small remove-btn" data-delete-check="${c.id}" title="Borrar este cheque">Borrar</button>
@@ -1402,7 +1411,137 @@ function renderPagosTab() {
   renderOpChequeRows();
   renderOpChequeSummary();
   renderOpList();
+  renderEndosoSection();
 }
+
+// Cheques tildados en el formulario de endoso (se resetea al guardar, al
+// cancelar, o al cambiar de factura de proveedor).
+let endosoSelectedCheckIds = [];
+
+function renderEndosoSection() {
+  const invoiceSelect = $("#endosoInvoiceId");
+  const prevValue = invoiceSelect.value;
+  const pending = state.invoices.filter((inv) => inv.type === "provider" && inv.status !== "PAGO");
+  invoiceSelect.innerHTML = `<option value="">Elegí una factura pendiente...</option>` + pending.map((inv) => {
+    const provider = byId(state.providers, inv.providerId)?.name || "";
+    const coverage = providerInvoiceCoverage(inv.id);
+    const falta = round2(Number(inv.amountGross) - coverage.total);
+    return `<option value="${inv.id}">${escapeHtml(provider)} · ${escapeHtml(inv.number)} · falta ${money(falta)} de ${money(inv.amountGross)}</option>`;
+  }).join("");
+  if (pending.some((inv) => inv.id === prevValue)) invoiceSelect.value = prevValue;
+
+  const invoiceId = invoiceSelect.value;
+  const invoice = byId(state.invoices, invoiceId);
+
+  const availableChecks = state.checks.filter((c) => c.status === "RECIBIDO");
+  $("#endosoCheckPicker").innerHTML = availableChecks.length
+    ? `<table class="picker-table">
+        <thead><tr><th></th><th>Cliente / OP</th><th>N° cheque</th><th>Banco</th><th>Fecha pago</th><th class="num">Monto</th></tr></thead>
+        <tbody>${availableChecks.map((c) => {
+          const op = byId(state.paymentOrders, c.paymentOrderId);
+          const client = op ? byId(state.clients, op.clientId)?.name || "" : "";
+          const checked = endosoSelectedCheckIds.includes(c.id);
+          return `<tr>
+            <td><input type="checkbox" data-endoso-check="${c.id}" ${checked ? "checked" : ""} /></td>
+            <td>${escapeHtml(client)}${op ? ` <span class="cell-sub">OP ${escapeHtml(op.number || op.id)}</span>` : ""}</td>
+            <td>${escapeHtml(c.numero || "-")}</td>
+            <td>${escapeHtml(c.banco || "-")}</td>
+            <td>${c.fechaPago || "-"}</td>
+            <td class="num">${money(c.monto)}</td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table>`
+    : `<p class="picker-empty">No hay cheques RECIBIDO disponibles para endosar por ahora.</p>`;
+
+  const selectedTotal = round2(availableChecks
+    .filter((c) => endosoSelectedCheckIds.includes(c.id))
+    .reduce((sum, c) => sum + Number(c.monto || 0), 0));
+
+  if (!invoice) {
+    $("#endosoSummary").innerHTML = "";
+    $("#endosoDirectPayment").innerHTML = "";
+    return;
+  }
+
+  const diff = round2(selectedTotal - Number(invoice.amountGross));
+  const diffHtml = Math.abs(diff) < 1
+    ? `<span class="ok">Cierra exacto ✓</span>`
+    : diff > 0
+      ? `<span class="ok">Margen de este endoso: ${money(diff)}</span>`
+      : `<span class="warn">Todavía falta cubrir ${money(-diff)} — completá abajo con un pago directo, o tildá otro cheque</span>`;
+
+  $("#endosoSummary").innerHTML = `<div style="display:flex;gap:18px;flex-wrap:wrap;">
+    <span>Factura a cubrir: <strong>${money(invoice.amountGross)}</strong></span>
+    <span>Cheques tildados: <strong>${money(selectedTotal)}</strong></span>
+    ${diffHtml}
+  </div>`;
+
+  const falta = Math.max(0, round2(Number(invoice.amountGross) - selectedTotal));
+  $("#endosoDirectPayment").innerHTML = falta > 0
+    ? `<p class="legend">Pago complementario (efectivo/transferencia) para cubrir lo que falta — opcional, también se puede cargar después desde Facturas:</p>
+       <div class="cheque-draft-row" style="grid-template-columns: 1fr 1fr 1fr;">
+         <label>Fecha<input type="date" id="endosoDirectFecha" /></label>
+         <label>Monto<input type="number" min="0" step="0.01" id="endosoDirectMonto" value="${falta}" /></label>
+         <label>Medio<select id="endosoDirectMedio">
+             <option value="TRANSFERENCIA">Transferencia</option>
+             <option value="EFECTIVO">Efectivo</option>
+           </select></label>
+       </div>`
+    : "";
+}
+
+$("#endosoInvoiceId").addEventListener("change", () => {
+  endosoSelectedCheckIds = [];
+  renderEndosoSection();
+});
+
+document.body.addEventListener("change", (event) => {
+  const checkId = event.target.dataset?.endosoCheck;
+  if (!checkId) return;
+  if (event.target.checked) endosoSelectedCheckIds.push(checkId);
+  else endosoSelectedCheckIds = endosoSelectedCheckIds.filter((id) => id !== checkId);
+  renderEndosoSection();
+});
+
+$("#endosoForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const invoiceId = $("#endosoInvoiceId").value;
+  if (!invoiceId) {
+    alert("Elegí una factura de proveedor primero.");
+    return;
+  }
+  if (!endosoSelectedCheckIds.length) {
+    alert("Tildá al menos un cheque para endosar.");
+    return;
+  }
+  const montoDirectoInput = $("#endosoDirectMonto");
+  const montoDirecto = Number(montoDirectoInput?.value || 0);
+  const fechaDirecto = $("#endosoDirectFecha")?.value || "";
+  if (montoDirecto > 0 && !fechaDirecto) {
+    alert("Completá la fecha del pago complementario (o poné el monto en 0 si no hace falta).");
+    return;
+  }
+  endosoSelectedCheckIds.forEach((id) => {
+    const check = byId(state.checks, id);
+    if (!check) return;
+    check.status = "ENDOSADO";
+    check.providerInvoiceIds = [...new Set([...(check.providerInvoiceIds || []), invoiceId])];
+  });
+  if (montoDirecto > 0) {
+    state.directPayments = state.directPayments || [];
+    state.directPayments.push({
+      id: cryptoId(),
+      invoiceId,
+      invoiceType: "provider",
+      fecha: fechaDirecto,
+      monto: montoDirecto,
+      medio: $("#endosoDirectMedio")?.value === "EFECTIVO" ? "EFECTIVO" : "TRANSFERENCIA"
+    });
+  }
+  endosoSelectedCheckIds = [];
+  $("#endosoForm").reset();
+  render();
+});
 
 document.body.addEventListener("click", (event) => {
   const toggleId = event.target.closest("[data-toggle-op]")?.dataset.toggleOp;
@@ -1438,7 +1577,11 @@ document.body.addEventListener("click", (event) => {
   }
   const deleteCheckId = event.target.dataset?.deleteCheck;
   if (deleteCheckId) {
-    if (!confirm("¿Borrar este cheque? Podés volver a cargarlo con el formulario de abajo.")) return;
+    const check = byId(state.checks, deleteCheckId);
+    const warning = check?.status === "ENDOSADO"
+      ? "Este cheque está ENDOSADO a una factura de proveedor — si lo borrás, esa factura va a quedar sin esa parte de cobertura (podés volver a endosar otro cheque después). ¿Confirmás?"
+      : "¿Borrar este cheque? Podés volver a cargarlo con el formulario de abajo.";
+    if (!confirm(warning)) return;
     state.checks = state.checks.filter((c) => c.id !== deleteCheckId);
     render();
     return;
@@ -1554,15 +1697,19 @@ function renderMonthlyTable() {
     const netAccrued = accrued - expensesMonth;
     accruedCum += netAccrued;
 
-    const paidInvoices = state.invoices.filter((inv) => inv.status === "PAGO" && inv.paymentDate && monthKey(inv.paymentDate) === month);
-    const cobradoReal = paidInvoices
-      .filter((inv) => inv.type === "client")
-      .reduce((sum, inv) => sum + Number(inv.amountGross) - Number(inv.retIva || 0) - Number(inv.retGanancias || 0), 0);
-    const pagadoReal = paidInvoices
-      .filter((inv) => inv.type === "provider")
-      .reduce((sum, inv) => sum + Number(inv.amountGross), 0);
-    const ivaRetenido = paidInvoices
-      .filter((inv) => inv.type === "client")
+    // Caja real: solo plata que efectivamente entró/salió del banco de
+    // Hojaldra este mes. Del lado de cobros, eso es la parte ACREDITADA de
+    // los cheques (nunca la endosada — esa nunca pasó por la cuenta). Del
+    // lado de pagos a proveedor, son los pagos directos (efectivo/
+    // transferencia) que se registraron a mano — nunca lo endosado.
+    const cobradoReal = round2(state.checks
+      .filter((c) => c.status === "ACREDITADO" && c.fechaPago && monthKey(c.fechaPago) === month)
+      .reduce((sum, c) => sum + Number(c.monto || 0), 0));
+    const pagadoReal = round2((state.directPayments || [])
+      .filter((p) => p.fecha && monthKey(p.fecha) === month)
+      .reduce((sum, p) => sum + Number(p.monto || 0), 0));
+    const ivaRetenido = state.invoices
+      .filter((inv) => inv.type === "client" && inv.status === "PAGO" && inv.paymentDate && monthKey(inv.paymentDate) === month)
       .reduce((sum, inv) => sum + Number(inv.retIva || 0), 0);
     const cashResult = cobradoReal - pagadoReal - expensesMonth;
     cashCum += cashResult;
@@ -1767,12 +1914,8 @@ function opChecksTotal(op) {
 
 /**
  * Un cheque "resuelto" es uno que ya no puede volver a moverse: se depositó
- * (ACREDITADO) o se endosó (ENDOSADO — todavía sin UI, Etapa 2). RECIBIDO y
- * RECHAZADO no cuentan como resueltos.
- *
- * OJO Etapa 2: cuando se implemente el endoso, el reporte de Caja Real
- * (Liquidez) va a tener que sumar SOLO los cheques ACREDITADO como cobro
- * real de banco — un cheque ENDOSADO nunca tocó la cuenta de Hojaldra.
+ * (ACREDITADO) o se endosó a un proveedor (ENDOSADO). RECIBIDO y RECHAZADO
+ * no cuentan como resueltos.
  */
 function checkIsResolved(check) {
   return check.status === "ACREDITADO" || check.status === "ENDOSADO";
@@ -1790,28 +1933,86 @@ function clientInvoiceOP(invoiceId) {
   return state.paymentOrders.find((op) => (op.invoiceIds || []).includes(invoiceId));
 }
 
+/** Cheques endosados (status ENDOSADO) que quedaron aplicados a esta factura de proveedor. */
+function checksEndorsedToInvoice(invoiceId) {
+  return state.checks.filter((c) => c.status === "ENDOSADO" && (c.providerInvoiceIds || []).includes(invoiceId));
+}
+
+/** Etiqueta chica "→ Nº factura (Proveedor)" para mostrar al lado de un cheque ENDOSADO, con trazabilidad de a quién fue a parar. */
+function checksEndorsedInvoiceLabel(check) {
+  const labels = (check.providerInvoiceIds || []).map((invoiceId) => {
+    const inv = byId(state.invoices, invoiceId);
+    if (!inv) return null;
+    const provider = byId(state.providers, inv.providerId)?.name || "";
+    return `${escapeHtml(inv.number)} (${escapeHtml(provider)})`;
+  }).filter(Boolean);
+  return labels.length ? `<br><span class="cell-sub">→ ${labels.join(", ")}</span>` : "";
+}
+
+function directPaymentsForInvoice(invoiceId) {
+  return (state.directPayments || []).filter((p) => p.invoiceId === invoiceId);
+}
+
+/**
+ * Cuánto de una factura de PROVEEDOR ya está cubierto, y con qué: la parte
+ * endosada (cheques que nunca tocaron el banco de Hojaldra) y la parte
+ * pagada directo (efectivo/transferencia real). "total" es lo que hace falta
+ * comparar contra el monto de la factura para saber si ya está resuelta —
+ * no hace falta que cierre exacto, endosar de más es margen, no error.
+ */
+function providerInvoiceCoverage(invoiceId) {
+  const endorsed = round2(checksEndorsedToInvoice(invoiceId).reduce((sum, c) => sum + Number(c.monto || 0), 0));
+  const direct = round2(directPaymentsForInvoice(invoiceId).reduce((sum, p) => sum + Number(p.monto || 0), 0));
+  return { endorsed, direct, total: round2(endorsed + direct) };
+}
+
+function providerInvoiceIsResolved(invoiceId, amountGross) {
+  return providerInvoiceCoverage(invoiceId).total >= Number(amountGross) - 1;
+}
+
 /**
  * El estado de una factura de CLIENTE ya no se tipea a mano — se deriva de
  * su OP. Corre al principio de cada render() para que todo lo que ya existía
  * (reportes, Liquidez, deliveryStatus) siga funcionando igual sin tener que
  * reescribirlo: el campo status se mantiene actualizado solo.
+ *
+ * Lo mismo aplica ahora del lado de PROVEEDOR: el estado se deriva de la
+ * cobertura (cheques endosados + pagos directos) contra el monto de la
+ * factura — nunca se tipea a mano. paymentDate queda como "la fecha más
+ * reciente entre lo que la cubrió", para que Liquidez sepa en qué mes cayó.
  */
 function syncClientInvoiceStatuses() {
   state.invoices.forEach((inv) => {
-    if (inv.type !== "client") return;
-    const op = clientInvoiceOP(inv.id);
-    if (!op) {
-      inv.status = "PENDIENTE";
+    if (inv.type === "client") {
+      const op = clientInvoiceOP(inv.id);
+      if (!op) {
+        inv.status = "PENDIENTE";
+        return;
+      }
+      const resolved = opIsFullyResolved(op);
+      inv.status = resolved ? "PAGO" : "PENDIENTE";
+      if (resolved && !inv.paymentDate) {
+        const fechas = opChecks(op).map((c) => c.fechaPago).filter(Boolean).sort();
+        inv.paymentDate = fechas[fechas.length - 1] || inv.paymentDate || "";
+      }
       return;
     }
-    const resolved = opIsFullyResolved(op);
-    inv.status = resolved ? "PAGO" : "PENDIENTE";
-    if (resolved && !inv.paymentDate) {
-      const fechas = opChecks(op).map((c) => c.fechaPago).filter(Boolean).sort();
-      inv.paymentDate = fechas[fechas.length - 1] || inv.paymentDate || "";
+    if (inv.type === "provider") {
+      const resolved = providerInvoiceIsResolved(inv.id, inv.amountGross);
+      inv.status = resolved ? "PAGO" : "PENDIENTE";
+      const fechas = [
+        ...checksEndorsedToInvoice(inv.id).map((c) => c.fechaPago),
+        ...directPaymentsForInvoice(inv.id).map((p) => p.fecha)
+      ].filter(Boolean).sort();
+      if (fechas.length) inv.paymentDate = fechas[fechas.length - 1];
+      else if (!resolved) inv.paymentDate = "";
     }
   });
 }
+
+// Edición inline del pago directo (efectivo/transferencia) de una factura
+// de proveedor — se pisa con null en cuanto se guarda/cancela/borra.
+let editingDirectPaymentInvoiceId = null;
 
 function renderInvoices() {
   const rows = sortInvoiceRows((state.invoices || []).map(invoiceRowData));
@@ -1835,18 +2036,44 @@ function renderInvoices() {
     const ocCell = item.type === "client"
       ? `<input type="text" value="${escapeHtml(item.ocNumber || "")}" placeholder="N° OC" data-oc-invoice="${item.id}" class="ret-input" />`
       : `<span class="cell-sub">-</span>`;
-    const chequeCell = item.type === "client"
-      ? (item.op
-          ? `<span class="cell-sub">OP ${escapeHtml(item.op.number || item.op.id)}</span>`
-          : `<span class="cell-sub">Sin OP todavía</span>`)
-      : `<span class="cell-sub">-</span>`;
-    const pagoCell = item.type === "client"
-      ? `<span class="cell-sub">${item.paymentDate || "-"}</span>`
-      : `<input type="date" value="${item.paymentDate || ""}" data-payment-date="${item.id}" />`;
-    const actionsCell = item.type === "client"
-      ? `<button type="button" data-delete-invoice="${item.id}" title="Eliminar">Borrar</button>`
-      : `<button type="button" data-save-payment="${item.id}" title="Guardar pago">Pago</button>
-         <button type="button" data-delete-invoice="${item.id}" title="Eliminar">Borrar</button>`;
+
+    let chequeCell, pagoCell, actionsCell;
+    if (item.type === "client") {
+      chequeCell = item.op
+        ? `<span class="cell-sub">OP ${escapeHtml(item.op.number || item.op.id)}</span>`
+        : `<span class="cell-sub">Sin OP todavía</span>`;
+      pagoCell = `<span class="cell-sub">${item.paymentDate || "-"}</span>`;
+      actionsCell = `<button type="button" data-delete-invoice="${item.id}" title="Eliminar">Borrar</button>`;
+    } else {
+      const coverage = providerInvoiceCoverage(item.id);
+      const directPayments = directPaymentsForInvoice(item.id);
+      chequeCell = coverage.endorsed > 0
+        ? `<span class="cell-sub">Endosado ${money(coverage.endorsed)}</span>`
+        : `<span class="cell-sub">-</span>`;
+
+      const isEditing = editingDirectPaymentInvoiceId === item.id;
+      const falta = Math.max(0, round2(Number(item.amountGross || 0) - coverage.total));
+      const directChips = directPayments.length
+        ? directPayments.map((p) => `<span class="chip">${p.fecha || "-"} · ${money(p.monto)} (${p.medio === "EFECTIVO" ? "efectivo" : "transf."}) <button type="button" class="chip-remove" data-delete-direct-payment="${p.id}" title="Borrar este pago">✕</button></span>`).join("")
+        : "";
+      const summaryLine = `<span class="cell-sub">Cubierto ${money(coverage.total)} / ${money(item.amountGross)}${item.paymentDate ? " · " + item.paymentDate : ""}</span>`;
+      pagoCell = isEditing
+        ? `<div class="cheque-draft-row" style="grid-template-columns: 1fr 1fr 1fr 30px; margin:0; white-space:normal;">
+            <label>Fecha<input type="date" data-direct-payment-field="fecha" data-direct-payment-invoice="${item.id}" /></label>
+            <label>Monto<input type="number" min="0" step="0.01" value="${falta}" data-direct-payment-field="monto" data-direct-payment-invoice="${item.id}" /></label>
+            <label>Medio<select data-direct-payment-field="medio" data-direct-payment-invoice="${item.id}">
+                <option value="TRANSFERENCIA">Transferencia</option>
+                <option value="EFECTIVO">Efectivo</option>
+              </select></label>
+            <button type="button" class="small" data-direct-payment-save="${item.id}" title="Guardar pago">✓</button>
+          </div>`
+        : `<div style="white-space:normal;">${summaryLine}${directChips ? `<div>${directChips}</div>` : ""}</div>`;
+      actionsCell = `${isEditing
+          ? `<button type="button" class="small cancel-edit-btn" data-direct-payment-cancel="${item.id}">Cancelar</button>`
+          : `<button type="button" class="small" data-direct-payment-add="${item.id}" title="Registrar pago en efectivo o transferencia">+ Pago directo</button>`}
+        <button type="button" data-delete-invoice="${item.id}" title="Eliminar">Borrar</button>`;
+    }
+
     return `<tr>
       <td>${item.type === "client" ? "Cliente" : "Proveedor"}</td>
       <td>${escapeHtml(entity)}</td>
@@ -2367,7 +2594,6 @@ document.body.addEventListener("click", (event) => {
   const deliveryId = event.target.dataset?.deleteDelivery;
   const ruleId = event.target.dataset?.deleteRule;
   const invoiceId = event.target.dataset?.deleteInvoice;
-  const paymentId = event.target.dataset?.savePayment;
   const expenseId = event.target.dataset?.deleteExpense;
   const chequeId = event.target.dataset?.saveCheque;
   if (chequeId) {
@@ -2399,21 +2625,61 @@ document.body.addEventListener("click", (event) => {
     render();
   }
   if (invoiceId) {
+    // Si es una factura de proveedor con cheques endosados, esos cheques
+    // vuelven a RECIBIDO (no se pierden, quedan libres para endosar a otra
+    // factura) y se borran los pagos directos que la cubrían — para no
+    // dejar referencias colgando a una factura que ya no existe.
+    state.checks.forEach((c) => {
+      if ((c.providerInvoiceIds || []).includes(invoiceId)) {
+        c.providerInvoiceIds = c.providerInvoiceIds.filter((id) => id !== invoiceId);
+        if (!c.providerInvoiceIds.length && c.status === "ENDOSADO") c.status = "RECIBIDO";
+      }
+    });
+    state.directPayments = (state.directPayments || []).filter((p) => p.invoiceId !== invoiceId);
     state.invoices = state.invoices.filter((item) => item.id !== invoiceId);
     render();
   }
-  if (paymentId) {
-    const invoiceItem = state.invoices.find((item) => item.id === paymentId);
-    const input = document.querySelector(`input[data-payment-date="${paymentId}"]`);
-    const retIvaInput = document.querySelector(`input[data-ret-iva="${paymentId}"]`);
-    const retGanInput = document.querySelector(`input[data-ret-ganancias="${paymentId}"]`);
-    if (invoiceItem && input?.value) {
-      invoiceItem.paymentDate = input.value;
-      invoiceItem.status = "PAGO";
-      if (retIvaInput) invoiceItem.retIva = Number(retIvaInput.value || 0);
-      if (retGanInput) invoiceItem.retGanancias = Number(retGanInput.value || 0);
-      render();
+  const addPaymentId = event.target.dataset?.directPaymentAdd;
+  if (addPaymentId) {
+    editingDirectPaymentInvoiceId = addPaymentId;
+    renderInvoices();
+    return;
+  }
+  const cancelPaymentId = event.target.dataset?.directPaymentCancel;
+  if (cancelPaymentId) {
+    editingDirectPaymentInvoiceId = null;
+    renderInvoices();
+    return;
+  }
+  const savePaymentInvoiceId = event.target.dataset?.directPaymentSave;
+  if (savePaymentInvoiceId) {
+    const fields = {};
+    document.querySelectorAll(`[data-direct-payment-invoice="${savePaymentInvoiceId}"]`).forEach((input) => {
+      fields[input.dataset.directPaymentField] = input.value;
+    });
+    if (!fields.fecha || !fields.monto || Number(fields.monto) <= 0) {
+      alert("Completá fecha y monto antes de guardar el pago.");
+      return;
     }
+    state.directPayments = state.directPayments || [];
+    state.directPayments.push({
+      id: cryptoId(),
+      invoiceId: savePaymentInvoiceId,
+      invoiceType: "provider",
+      fecha: fields.fecha,
+      monto: Number(fields.monto),
+      medio: fields.medio === "EFECTIVO" ? "EFECTIVO" : "TRANSFERENCIA"
+    });
+    editingDirectPaymentInvoiceId = null;
+    render();
+    return;
+  }
+  const deleteDirectPaymentId = event.target.dataset?.deleteDirectPayment;
+  if (deleteDirectPaymentId) {
+    if (!confirm("¿Borrar este pago directo?")) return;
+    state.directPayments = (state.directPayments || []).filter((p) => p.id !== deleteDirectPaymentId);
+    render();
+    return;
   }
 });
 
@@ -2494,6 +2760,14 @@ function mergeState(imported) {
     if (!existingExpenseIds.has(e.id)) {
       state.expenses.push(e);
       existingExpenseIds.add(e.id);
+    }
+  });
+
+  const existingDirectPaymentIds = new Set((state.directPayments || []).map((p) => p.id));
+  (imported.directPayments || []).forEach((p) => {
+    if (!existingDirectPaymentIds.has(p.id)) {
+      state.directPayments.push(p);
+      existingDirectPaymentIds.add(p.id);
     }
   });
 

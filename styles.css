@@ -338,6 +338,26 @@ th.num {
   color: #8a4a09;
 }
 
+.status.RECIBIDO {
+  background: #fff4d6;
+  color: #7a4e09;
+}
+
+.status.ACREDITADO {
+  background: #dff2e8;
+  color: #145338;
+}
+
+.status.RECHAZADO {
+  background: #f9dedb;
+  color: #82302c;
+}
+
+.status.ENDOSADO {
+  background: #e7e3f7;
+  color: #46358a;
+}
+
 .catalog-grid {
   grid-template-columns: repeat(4, minmax(200px, 1fr));
 }
@@ -587,6 +607,21 @@ li {
   min-height: auto;
   margin-left: 4px;
   vertical-align: middle;
+}
+
+.chip-remove {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+  min-height: auto;
+  margin-left: 2px;
+  color: var(--muted);
+}
+
+.chip-remove:hover {
+  color: var(--red);
 }
 
 .warn {

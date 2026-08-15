@@ -354,6 +354,23 @@
           <p class="legend">Click en una para ver el detalle de facturas y cheques.</p>
           <div id="opList"></div>
         </div>
+
+        <form id="endosoForm" style="margin-top:24px; border-top:1px solid var(--line); padding-top:18px;">
+          <h2>4. Endosar cheques a un proveedor</h2>
+          <p class="legend">Un cheque que recibiste de un cliente se lo pasás directo a un proveedor, sin que entre a tu cuenta — la diferencia entre lo que endosás y lo que cubre la factura del proveedor es tu margen.</p>
+          <label>Factura de proveedor a cubrir<select id="endosoInvoiceId"><option value="">Elegí una factura pendiente...</option></select></label>
+
+          <p class="legend" style="margin-top:10px;">Tildá los cheques disponibles (recibidos, sin acreditar ni endosar todavía) hasta acercarte al monto de la factura:</p>
+          <div id="endosoCheckPicker" class="picker"></div>
+
+          <div id="endosoSummary" style="margin-top:10px;"></div>
+
+          <div id="endosoDirectPayment" style="margin-top:10px;"></div>
+
+          <div style="margin-top:14px;">
+            <button type="submit">Guardar endoso</button>
+          </div>
+        </form>
       </section>
 
       <section id="liquidez" class="panel">
