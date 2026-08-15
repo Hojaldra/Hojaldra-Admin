@@ -1192,7 +1192,7 @@ function renderOpChequeRows() {
 
   const container = $("#opChequeRows");
   if (!opDraftChecks.length) {
-    container.innerHTML = `<p class="picker-empty">${metodo === "TRANSFERENCIA" ? "Todavía no cargaste ninguna transferencia." : "Todavía no cargaste ningún cheque."}</p>`;
+    container.innerHTML = `<p class="picker-empty">${metodo === "TRANSFERENCIA" ? `Todavía no cargaste ninguna transferencia — hacé click en "+ Agregar transferencia" para poner fecha y monto.` : `Todavía no cargaste ningún cheque — hacé click en "+ Agregar cheque".`}</p>`;
     return;
   }
   if (metodo === "TRANSFERENCIA") {
@@ -1245,9 +1245,16 @@ $("#opMetodo").addEventListener("change", () => {
 ["#opIvaRate", "#opGananciasRate"].forEach((sel) => $(sel).addEventListener("input", renderOpBreakdown));
 
 $("#opAddChequeBtn").addEventListener("click", () => {
+  // Se propone como monto lo que todavía falta cubrir del neto a abonar
+  // (no lo que ya está cargado en otras filas), para no tener que
+  // retipear el total cuando el pago es único y completo — que es el
+  // caso más común. Si no llega a cubrir todo (o ya se pasó), el aviso
+  // de abajo ("Falta cubrir" / "Te pasaste por") sigue avisando igual.
+  const yaCubierto = round2(opDraftChecks.reduce((sum, c) => sum + Number(c.monto || 0), 0));
+  const falta = round2(Math.max(0, draftOpBreakdown().netoAAbonar - yaCubierto));
   const draft = $("#opMetodo").value === "TRANSFERENCIA"
-    ? { fechaPago: "", monto: 0 }
-    : { numero: "", banco: "", fechaEmision: "", fechaPago: "", monto: 0 };
+    ? { fechaPago: "", monto: falta }
+    : { numero: "", banco: "", fechaEmision: "", fechaPago: "", monto: falta };
   opDraftChecks.push(draft);
   renderOpChequeRows();
   renderOpChequeSummary();
