@@ -106,19 +106,19 @@
             </colgroup>
             <thead>
               <tr>
-                <th>Fecha</th>
-                <th>Semana / Período</th>
+                <th data-sort="date" class="sortable">Fecha</th>
+                <th data-sort="period" class="sortable">Semana / Período</th>
                 <th>OC</th>
-                <th>Remito</th>
-                <th>Cliente</th>
-                <th>Sala</th>
-                <th>Proveedor</th>
-                <th>Producto</th>
-                <th>Cant.</th>
-                <th>Venta s/IVA</th>
-                <th>Pago prov. s/IVA</th>
-                <th>Margen</th>
-                <th>Estado</th>
+                <th data-sort="receiptNo" class="sortable">Remito</th>
+                <th data-sort="client" class="sortable">Cliente</th>
+                <th data-sort="location" class="sortable">Sala</th>
+                <th data-sort="provider" class="sortable">Proveedor</th>
+                <th data-sort="product" class="sortable">Producto</th>
+                <th data-sort="quantity" class="sortable num">Cant.</th>
+                <th data-sort="saleNet" class="sortable num">Venta s/IVA</th>
+                <th data-sort="providerNet" class="sortable num">Pago prov. s/IVA</th>
+                <th data-sort="profitNet" class="sortable num">Margen</th>
+                <th data-sort="status" class="sortable">Estado</th>
                 <th></th>
               </tr>
             </thead>
@@ -139,6 +139,11 @@
           <label>Vigente desde<input name="validFrom" type="date" required /></label>
           <button type="submit">Guardar precio</button>
         </form>
+
+        <div class="toolbar rules-filter-toolbar">
+          <label>Filtrar por Sala<select id="ruleLocationFilter"><option value="">Todas</option></select></label>
+          <label>Filtrar por Producto<select id="ruleProductFilter"><option value="">Todos</option></select></label>
+        </div>
 
         <div class="table-wrap">
           <table>

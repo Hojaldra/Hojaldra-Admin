@@ -244,6 +244,14 @@ table {
   min-width: 0;
 }
 
+#balanceTable {
+  min-width: 0;
+}
+
+.rules-filter-toolbar {
+  grid-template-columns: repeat(2, minmax(160px, 1fr));
+}
+
 th,
 td {
   padding: 9px 10px;
@@ -577,6 +585,8 @@ li {
   font-size: 14px;
   padding: 0;
   min-height: auto;
+  margin-left: 4px;
+  vertical-align: middle;
 }
 
 .warn {

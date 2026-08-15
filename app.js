@@ -406,6 +406,32 @@ function fmtDDMM(d) {
   return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
+/** Fecha ISO ("2026-08-14") a dd/mm/yy ("14/08/26"), para la tabla de Remitos. */
+function fmtDDMMYY(dateText) {
+  if (!dateText) return "";
+  const [y, m, d] = dateText.split("-");
+  if (!y || !m || !d) return dateText;
+  return `${d}/${m}/${y.slice(2)}`;
+}
+
+/**
+ * Celda "Semana / Período" de la tabla de Remitos: para clientes semanales
+ * se parte en 2 líneas (Semana + rango de fechas más chico) para que sea
+ * legible en la columna angosta. Mensual/OC quedan en una sola línea como
+ * siempre (periodLabelFor sigue usándose para esos casos y para el resto
+ * de las pantallas que no piden este formato de 2 líneas).
+ */
+function periodCellHtml(item) {
+  const client = byId(state.clients, item.clientId);
+  if (!client) return "";
+  if (client.billingCycle === "monthly") return escapeHtml(item.date.slice(0, 7));
+  if (client.billingCycle === "po") return escapeHtml(ocLabelForDelivery(item));
+  const weekStartDay = client.weekStartDay ?? 6;
+  const weekNum = periodKeyFor(item);
+  const { start, end } = weekBoundsFor(item.date, weekStartDay);
+  return `Semana${escapeHtml(weekNum)}<br><span class="cell-sub">(${fmtDDMM(start)} - ${fmtDDMM(end)})</span>`;
+}
+
 function periodLabelFor(item) {
   const client = byId(state.clients, item.clientId);
   if (!client) return "";
@@ -603,8 +629,41 @@ function render() {
   saveState();
 }
 
+// Estado del orden actual de la tabla de Remitos. Por defecto: Fecha
+// ascendente (igual que el orden con el que ya se cargan/insertan).
+let deliverySort = { key: "date", dir: "asc" };
+
+function deliverySortValue(item, key) {
+  const t = totalsFor(item);
+  if (key === "date") return item.date || "";
+  if (key === "period") return periodKeyFor(item) || "";
+  if (key === "receiptNo") return item.receiptNo || "";
+  if (key === "client") return byId(state.clients, item.clientId)?.name || "";
+  if (key === "location") return byId(state.locations, item.locationId)?.name || "";
+  if (key === "provider") return byId(state.providers, item.providerId)?.name || "";
+  if (key === "product") return byId(state.products, item.productId)?.name || "";
+  if (key === "quantity") return Number(item.quantity) || 0;
+  if (key === "saleNet") return t.saleNet;
+  if (key === "providerNet") return t.providerNet;
+  if (key === "profitNet") return t.profitNet;
+  if (key === "status") return deliveryStatusLabel(deliveryStatus(item.id));
+  return "";
+}
+
 function renderDeliveries() {
-  const rows = filteredDeliveries();
+  const rows = filteredDeliveries().sort((a, b) => {
+    const va = deliverySortValue(a, deliverySort.key);
+    const vb = deliverySortValue(b, deliverySort.key);
+    const cmp = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb), undefined, { numeric: true });
+    return deliverySort.dir === "asc" ? cmp : -cmp;
+  });
+
+  document.querySelectorAll("#deliveries th.sortable").forEach((th) => {
+    th.classList.toggle("sort-active", th.dataset.sort === deliverySort.key);
+    const arrow = th.dataset.sort === deliverySort.key ? (deliverySort.dir === "asc" ? "▲" : "▼") : "▲";
+    th.innerHTML = `${th.textContent.replace(/[▲▼]/g, "").trim()} <span class="sort-arrow">${arrow}</span>`;
+  });
+
   $("#deliveryRows").innerHTML = rows.length ? rows.map((item) => {
     const t = totalsFor(item);
     const clientObj = byId(state.clients, item.clientId);
@@ -616,11 +675,14 @@ function renderDeliveries() {
     const ocCell = clientObj?.billingCycle === "po"
       ? `<input type="text" value="${escapeHtml(item.ocNumber || "")}" placeholder="anotar OC" data-oc-delivery="${item.id}" class="ret-input" />`
       : `<span class="cell-sub">-</span>`;
+    const noteIcon = item.note
+      ? `<button type="button" class="note-icon" data-note="${escapeHtml(item.note)}" title="${escapeHtml(item.note)}">📝</button>`
+      : "";
     return `<tr>
-      <td>${item.date}</td>
-      <td>${escapeHtml(periodLabelFor(item))}</td>
+      <td>${fmtDDMMYY(item.date)}</td>
+      <td>${periodCellHtml(item)}</td>
       <td>${ocCell}</td>
-      <td>${escapeHtml(item.receiptNo)}</td>
+      <td>${escapeHtml(item.receiptNo)}${noteIcon}</td>
       <td>${escapeHtml(client)}</td>
       <td>${escapeHtml(loc)}</td>
       <td>${escapeHtml(provider)}</td>
@@ -690,8 +752,29 @@ function ruleSortValue(item, key) {
   return "";
 }
 
+/** Filtros de la tabla de Precios: Sala y Producto, combinables entre sí. */
+function filteredRules() {
+  const locationId = $("#ruleLocationFilter").value;
+  const productId = $("#ruleProductFilter").value;
+  return state.priceRules.filter((item) => {
+    if (locationId && item.locationId !== locationId) return false;
+    if (productId && item.productId !== productId) return false;
+    return true;
+  });
+}
+
 function renderRules() {
-  const sorted = [...state.priceRules].sort((a, b) => {
+  const prevLocation = $("#ruleLocationFilter").value;
+  $("#ruleLocationFilter").innerHTML = `<option value="">Todas</option>` + state.locations.map((loc) =>
+    `<option value="${loc.id}">${escapeHtml(loc.name)} (${escapeHtml(byId(state.clients, loc.clientId)?.name || "")})</option>`
+  ).join("");
+  if (state.locations.some((l) => l.id === prevLocation)) $("#ruleLocationFilter").value = prevLocation;
+
+  const prevProduct = $("#ruleProductFilter").value;
+  $("#ruleProductFilter").innerHTML = `<option value="">Todos</option>${state.products.map(optionHtml).join("")}`;
+  if (state.products.some((p) => p.id === prevProduct)) $("#ruleProductFilter").value = prevProduct;
+
+  const sorted = filteredRules().sort((a, b) => {
     const va = ruleSortValue(a, ruleSort.key);
     const vb = ruleSortValue(b, ruleSort.key);
     const cmp = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb));
@@ -722,6 +805,24 @@ function renderRules() {
     </tr>`;
   }).join("");
 }
+
+document.querySelectorAll("#deliveries th.sortable").forEach((th) => {
+  th.addEventListener("click", () => {
+    if (deliverySort.key === th.dataset.sort) {
+      deliverySort.dir = deliverySort.dir === "asc" ? "desc" : "asc";
+    } else {
+      deliverySort = { key: th.dataset.sort, dir: "asc" };
+    }
+    renderDeliveries();
+  });
+});
+
+/** Ícono de nota en Remitos: click muestra el texto completo (el hover ya lo muestra vía title). */
+document.body.addEventListener("click", (event) => {
+  const noteBtn = event.target.closest(".note-icon");
+  if (!noteBtn) return;
+  alert(noteBtn.dataset.note);
+});
 
 document.querySelectorAll("#rules th.sortable").forEach((th) => {
   th.addEventListener("click", () => {
@@ -1814,6 +1915,10 @@ function toggleOcVisibility(form) {
 
 ["#monthFilter", "#clientFilter", "#providerFilter", "#weekFilter"].forEach((selector) => {
   $(selector).addEventListener("change", render);
+});
+
+["#ruleLocationFilter", "#ruleProductFilter"].forEach((selector) => {
+  $(selector).addEventListener("change", renderRules);
 });
 
 ["#deliveryForm", "#ruleForm", "#clientInvoiceForm", "#providerInvoiceForm"].forEach((selector) => {
