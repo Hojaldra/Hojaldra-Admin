@@ -346,7 +346,7 @@ function byId(collection, id) {
 }
 
 function money(value) {
-  return new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 }).format(value || 0);
+  return new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value || 0);
 }
 
 /**
@@ -577,37 +577,40 @@ function renderOptions() {
     providerFilter: $("#providerFilter").value
   };
 
-  fillSelects("provider", state.providers);
-  fillSelects("client", state.clients);
-  fillSelects("product", state.products);
-  fillSelects("location", state.locations.map((loc) => ({
+  fillSelects("provider", sortByName(state.providers));
+  fillSelects("client", sortByName(state.clients));
+  fillSelects("product", sortByName(state.products));
+  fillSelects("location", sortByName(state.locations.map((loc) => ({
     ...loc,
     name: `${loc.name} (${byId(state.clients, loc.clientId)?.name || ""})`
-  })));
+  }))));
 
-  $("#clientFilter").innerHTML = `<option value="">Todos</option>${state.clients.map(optionHtml).join("")}`;
-  $("#providerFilter").innerHTML = `<option value="">Todos</option>${state.providers.map(optionHtml).join("")}`;
+  $("#clientFilter").innerHTML = `<option value="">Todos</option>${sortByName(state.clients).map(optionHtml).join("")}`;
+  $("#providerFilter").innerHTML = `<option value="">Todos</option>${sortByName(state.providers).map(optionHtml).join("")}`;
   $("#clientFilter").value = selected.clientFilter;
   $("#providerFilter").value = selected.providerFilter;
 
   filterLocationSelectByClient($("#deliveryForm"));
   filterLocationSelectByClient($("#ruleForm"));
   filterLocationSelectByClient($("#clientInvoiceForm"));
-  filterLocationSelectByClient($("#providerInvoiceForm"));
+  // La factura de proveedor sí permite dejar "Todas las salas" — hay
+  // proveedores (como CP) que facturan consolidado, juntando remitos de
+  // varias salas del mismo cliente en un solo comprobante.
+  filterLocationSelectByClient($("#providerInvoiceForm"), "Todas las salas de este cliente");
 
   toggleOcVisibility($("#deliveryForm"));
   toggleOcVisibility($("#clientInvoiceForm"));
 }
 
 /** Cuando se elige un cliente en un formulario, la sala solo muestra las de ESE cliente. */
-function filterLocationSelectByClient(form) {
+function filterLocationSelectByClient(form, blankLabel) {
   const clientSelect = form.elements.clientId;
   const locationSelect = form.elements.locationId;
   if (!clientSelect || !locationSelect) return;
   const clientId = clientSelect.value;
-  const options = state.locations.filter((loc) => !clientId || loc.clientId === clientId);
+  const options = sortByName(state.locations.filter((loc) => !clientId || loc.clientId === clientId));
   const current = locationSelect.value;
-  locationSelect.innerHTML = `<option value="">Elegí...</option>` + options.map(optionHtml).join("");
+  locationSelect.innerHTML = `<option value="">${escapeHtml(blankLabel || "Elegí...")}</option>` + options.map(optionHtml).join("");
   if (options.some((o) => o.id === current)) locationSelect.value = current;
 }
 
@@ -620,6 +623,11 @@ function fillSelects(prefix, values) {
 
 function optionHtml(item) {
   return `<option value="${item.id}">${escapeHtml(item.name)}</option>`;
+}
+
+/** Copia ordenada alfabéticamente por "name" (con acentos/ñ bien puestos), para poblar cualquier <select> del catálogo sin alterar el orden real de state.* en ningún otro lado. */
+function sortByName(items) {
+  return [...items].sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "es", { sensitivity: "base" }));
 }
 
 function render() {
@@ -774,13 +782,15 @@ function filteredRules() {
 
 function renderRules() {
   const prevLocation = $("#ruleLocationFilter").value;
-  $("#ruleLocationFilter").innerHTML = `<option value="">Todas</option>` + state.locations.map((loc) =>
-    `<option value="${loc.id}">${escapeHtml(loc.name)} (${escapeHtml(byId(state.clients, loc.clientId)?.name || "")})</option>`
-  ).join("");
+  const sortedLocationsForFilter = sortByName(state.locations.map((loc) => ({
+    ...loc,
+    name: `${loc.name} (${byId(state.clients, loc.clientId)?.name || ""})`
+  })));
+  $("#ruleLocationFilter").innerHTML = `<option value="">Todas</option>` + sortedLocationsForFilter.map(optionHtml).join("");
   if (state.locations.some((l) => l.id === prevLocation)) $("#ruleLocationFilter").value = prevLocation;
 
   const prevProduct = $("#ruleProductFilter").value;
-  $("#ruleProductFilter").innerHTML = `<option value="">Todos</option>${state.products.map(optionHtml).join("")}`;
+  $("#ruleProductFilter").innerHTML = `<option value="">Todos</option>${sortByName(state.products).map(optionHtml).join("")}`;
   if (state.products.some((p) => p.id === prevProduct)) $("#ruleProductFilter").value = prevProduct;
 
   const sorted = filteredRules().sort((a, b) => {
@@ -1000,13 +1010,13 @@ function rowForSalaWeek(group) {
 
   const clientCell = clientInvoices.length
     ? clientInvoices.map((inv) =>
-        `${escapeHtml(inv.number)}<br><span class="cell-sub">${money(inv.amountGross)}${inv.paymentDate ? ` · pagado ${inv.paymentDate}` : " · sin cobrar"}</span>`
+        `${escapeHtml(inv.number)}<br><span class="cell-sub">${money(inv.amountGross)}${inv.paymentDate ? ` · pagado ${fmtDDMMYY(inv.paymentDate)}` : " · sin cobrar"}</span>`
       ).join("<hr class=\"cell-sep\">") + (sinFacturar ? `<br><span class="cell-sub">+ ${sinFacturar} remito(s) sin facturar todavía</span>` : "")
     : `<span class="cell-sub">sin facturar</span>`;
 
   const providerCell = providerInvoices.length
     ? providerInvoices.map((inv) =>
-        `${escapeHtml(inv.number)}<br><span class="cell-sub">${money(inv.amountGross)}${inv.paymentDate ? ` · pagado ${inv.paymentDate}` : " · sin pagar"}</span>`
+        `${escapeHtml(inv.number)}<br><span class="cell-sub">${money(inv.amountGross)}${inv.paymentDate ? ` · pagado ${fmtDDMMYY(inv.paymentDate)}` : " · sin pagar"}</span>`
       ).join("<hr class=\"cell-sep\">")
     : `<span class="cell-sub">-</span>`;
 
@@ -1042,12 +1052,12 @@ function renderBalancePanel() {
   const periodSelect = $("#balancePeriod");
 
   const prevClient = clientSelect.value;
-  clientSelect.innerHTML = `<option value="">Elegí...</option>` + state.clients.map(optionHtml).join("");
+  clientSelect.innerHTML = `<option value="">Elegí...</option>` + sortByName(state.clients).map(optionHtml).join("");
   if (state.clients.some((c) => c.id === prevClient)) clientSelect.value = prevClient;
   const clientId = clientSelect.value;
 
   const prevLocation = locationSelect.value;
-  const locations = state.locations.filter((loc) => !clientId || loc.clientId === clientId);
+  const locations = sortByName(state.locations.filter((loc) => !clientId || loc.clientId === clientId));
   locationSelect.innerHTML = `<option value="">Elegí...</option>` + locations.map(optionHtml).join("");
   if (locations.some((l) => l.id === prevLocation)) locationSelect.value = prevLocation;
   const locationId = locationSelect.value;
@@ -1130,7 +1140,7 @@ function opSelectedInvoiceIds() {
 function renderOpClientSelect() {
   const select = $("#opClientId");
   const prev = select.value;
-  select.innerHTML = `<option value="">Elegí...</option>` + state.clients.map(optionHtml).join("");
+  select.innerHTML = `<option value="">Elegí...</option>` + sortByName(state.clients).map(optionHtml).join("");
   if (state.clients.some((c) => c.id === prev)) select.value = prev;
 }
 
@@ -1157,7 +1167,7 @@ function renderOpInvoicePicker() {
           <td><input type="checkbox" class="op-invoice-check" data-invoice-id="${inv.id}" /></td>
           <td>${escapeHtml(loc)}</td>
           <td>${escapeHtml(inv.number)}</td>
-          <td>${inv.issueDate}</td>
+          <td>${fmtDDMMYY(inv.issueDate)}</td>
           <td class="num">${money(inv.amountGross)}</td>
         </tr>`;
       }).join("")}
@@ -1167,13 +1177,32 @@ function renderOpInvoicePicker() {
   renderOpBreakdown();
 }
 
+/**
+ * Desglose "en vivo" de la OP que se está armando. Los $ de retención IVA y
+ * Ganancias se leen directo de los inputs editables (#opRetIva / #opRetGanancias)
+ * — si están vacíos (recién arrancando la OP), se les propone un cálculo de
+ * partida a partir del %, pero apenas el usuario tipea algo ahí, eso manda
+ * y ya no se vuelve a pisar solo, porque el % nunca representa exactamente
+ * lo que CrossRacer termina reteniendo (varía de OP a OP).
+ */
 function draftOpBreakdown() {
-  const draftOp = {
-    invoiceIds: opSelectedInvoiceIds(),
-    ivaInvoiceRatePct: Number($("#opIvaRate").value || IVA_RATE * 100),
-    gananciasRatePct: Number($("#opGananciasRate").value || 0)
-  };
-  return opBreakdown(draftOp);
+  const invoiceIds = opSelectedInvoiceIds();
+  const totalGross = round2(invoiceIds.reduce((sum, id) => sum + Number(byId(state.invoices, id)?.amountGross || 0), 0));
+  const ivaInvoiceRatePct = Number($("#opIvaRate").value || IVA_RATE * 100);
+  const netoSIva = round2(totalGross / (1 + ivaInvoiceRatePct / 100));
+  const autoRetIva = round2(totalGross - netoSIva);
+  const gananciasRatePct = Number($("#opGananciasRate").value || 0);
+  const autoRetGanancias = round2(netoSIva * (gananciasRatePct / 100));
+
+  const retIvaInput = $("#opRetIva");
+  const retGananciasInput = $("#opRetGanancias");
+  if (retIvaInput && retIvaInput.value === "") retIvaInput.value = autoRetIva;
+  if (retGananciasInput && retGananciasInput.value === "") retGananciasInput.value = autoRetGanancias;
+
+  const retIva = round2(Number(retIvaInput?.value || autoRetIva));
+  const retGanancias = round2(Number(retGananciasInput?.value || autoRetGanancias));
+  const netoAAbonar = round2(totalGross - retIva - retGanancias);
+  return { totalGross, netoSIva, autoRetIva, autoRetGanancias, retIva, retGanancias, netoAAbonar, ivaInvoiceRatePct, gananciasRatePct };
 }
 
 function renderOpBreakdown() {
@@ -1183,8 +1212,8 @@ function renderOpBreakdown() {
       <tbody>
         <tr><td>1. Total facturas tildadas (c/IVA)</td><td class="num">${money(b.totalGross)}</td></tr>
         <tr><td>2. Neto s/IVA (÷ ${(1 + b.ivaInvoiceRatePct / 100).toFixed(2)})</td><td class="num">${money(b.netoSIva)}</td></tr>
-        <tr><td>3. Retención IVA (100% del IVA de la factura)</td><td class="num">−${money(b.retIva)}</td></tr>
-        <tr><td>4. Retención Ganancias (${b.gananciasRatePct ?? $("#opGananciasRate").value}% del neto)</td><td class="num">−${money(b.retGanancias)}</td></tr>
+        <tr><td>3. Retención IVA <span class="cell-sub">(cálculo de partida: ${money(b.autoRetIva)} · 100% del IVA — pisalo abajo con el real)</span></td><td class="num">−${money(b.retIva)}</td></tr>
+        <tr><td>4. Retención Ganancias <span class="cell-sub">(cálculo de partida: ${money(b.autoRetGanancias)} al ${b.gananciasRatePct}% — pisalo abajo con el real)</span></td><td class="num">−${money(b.retGanancias)}</td></tr>
         <tr class="total"><td>5. Neto a abonar</td><td class="num">${money(b.netoAAbonar)}</td></tr>
       </tbody>
     </table>
@@ -1251,7 +1280,7 @@ $("#opMetodo").addEventListener("change", () => {
   renderOpChequeRows();
   renderOpChequeSummary();
 });
-["#opIvaRate", "#opGananciasRate"].forEach((sel) => $(sel).addEventListener("input", renderOpBreakdown));
+["#opIvaRate", "#opGananciasRate", "#opRetIva", "#opRetGanancias"].forEach((sel) => $(sel).addEventListener("input", renderOpBreakdown));
 
 $("#opAddChequeBtn").addEventListener("click", () => {
   // Se propone como monto lo que todavía falta cubrir del neto a abonar
@@ -1305,7 +1334,14 @@ $("#opForm").addEventListener("submit", (event) => {
     invoiceIds,
     metodo,
     ivaInvoiceRatePct: Number($("#opIvaRate").value || IVA_RATE * 100),
-    gananciasRatePct: Number($("#opGananciasRate").value || 0)
+    gananciasRatePct: Number($("#opGananciasRate").value || 0),
+    // Los montos de retención que realmente valen son estos dos — los que
+    // quedaron cargados en los campos editables (auto-calculados si el
+    // usuario no los tocó, o pegados a mano desde el comprobante real de
+    // CrossRacer si no cerraban con el %). opBreakdown() los usa siempre
+    // que estén presentes, en vez de recalcular con el %.
+    manualRetIva: draftOpBreakdown().retIva,
+    manualRetGanancias: draftOpBreakdown().retGanancias
   };
   state.paymentOrders.push(op);
   opDraftChecks.forEach((c) => {
@@ -1331,13 +1367,63 @@ $("#opForm").addEventListener("submit", (event) => {
   render();
 });
 
+// Paginado de la lista de OP: arranca mostrando las últimas 8, "Mostrar más"
+// suma de a 8. Se resetea a 8 cada vez que cambia el buscador o el filtro,
+// para no mostrar de golpe una lista larga después de filtrar por otra cosa.
+let opListVisibleCount = 8;
+const OP_LIST_PAGE_SIZE = 8;
+
 function renderOpList() {
+  const search = ($("#opListSearch")?.value || "").trim().toLowerCase();
+  const filterMode = $("#opListFilter")?.value || "all";
   const ops = [...state.paymentOrders].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
   if (!ops.length) {
     $("#opList").innerHTML = `<p class="legend">Todavía no armaste ninguna Orden de Pago.</p>`;
     return;
   }
-  $("#opList").innerHTML = ops.map((op) => {
+
+  let filtered = ops.filter((op) => {
+    const clientName = (byId(state.clients, op.clientId)?.name || "").toLowerCase();
+    const number = (op.number || op.id || "").toLowerCase();
+    if (search && !clientName.includes(search) && !number.includes(search)) return false;
+    if (filterMode === "open" && opIsFullyResolved(op)) return false;
+    if (filterMode === "closed" && !opIsFullyResolved(op)) return false;
+    return true;
+  });
+
+  if (!filtered.length) {
+    $("#opList").innerHTML = `<p class="legend">Ninguna OP coincide con esa búsqueda/filtro.</p>`;
+    return;
+  }
+
+  const visible = filtered.slice(0, opListVisibleCount);
+  const remaining = filtered.length - visible.length;
+  $("#opList").innerHTML = visible.map((op) => renderOpCard(op)).join("")
+    + (remaining > 0 ? `<button type="button" id="opListShowMore" class="small" style="margin-top:8px;">Mostrar ${Math.min(remaining, OP_LIST_PAGE_SIZE)} más (quedan ${remaining})</button>` : "");
+  const showMoreBtn = $("#opListShowMore");
+  if (showMoreBtn) showMoreBtn.addEventListener("click", () => {
+    opListVisibleCount += OP_LIST_PAGE_SIZE;
+    renderOpList();
+  });
+}
+
+$("#opListSearch").addEventListener("input", () => {
+  opListVisibleCount = OP_LIST_PAGE_SIZE;
+  renderOpList();
+});
+$("#opListFilter").addEventListener("change", () => {
+  opListVisibleCount = OP_LIST_PAGE_SIZE;
+  renderOpList();
+});
+
+$("#opListToggle").addEventListener("click", () => {
+  const body = $("#opListBody");
+  const collapsed = body.style.display === "none";
+  body.style.display = collapsed ? "" : "none";
+  $("#opListToggle").textContent = collapsed ? "Colapsar" : "Expandir";
+});
+
+function renderOpCard(op) {
     const clientName = byId(state.clients, op.clientId)?.name || "";
     const invoices = opInvoices(op);
     const checks = opChecks(op);
@@ -1353,7 +1439,7 @@ function renderOpList() {
     const checkRows = checks.map((c) => `<tr>
         <td>${c.metodo === "TRANSFERENCIA" ? "Transferencia" : escapeHtml(c.numero || "-")}</td>
         <td>${c.metodo === "TRANSFERENCIA" ? "-" : escapeHtml(c.banco || "-")}</td>
-        <td>${c.fechaPago || "-"}</td>
+        <td>${c.fechaPago ? fmtDDMMYY(c.fechaPago) : "-"}</td>
         <td class="num">${money(c.monto)}</td>
         <td><span class="status ${c.status}">${c.status}</span>${c.status === "ENDOSADO" ? (checksEndorsedInvoiceLabel(c)) : ""}</td>
         <td>
@@ -1377,7 +1463,7 @@ function renderOpList() {
         </div>`;
     return `<div class="op-card">
       <div class="op-header" data-toggle-op="${op.id}">
-        <div><strong>OP ${escapeHtml(op.number || op.id)}</strong> · ${escapeHtml(clientName)} · ${op.date}
+        <div><strong>OP ${escapeHtml(op.number || op.id)}</strong> · ${escapeHtml(clientName)} · ${fmtDDMMYY(op.date)}
           <span class="tag">${invoices.length} factura(s) · ${op.metodo === "TRANSFERENCIA" ? "Transferencia" : "Cheque"}</span>
         </div>
         <div>${statusBadge}</div>
@@ -1402,7 +1488,6 @@ function renderOpList() {
         <p class="legend">"Borrar OP" borra la orden completa con todos sus ${op.metodo === "TRANSFERENCIA" ? "transferencias" : "cheques"} — para corregir uno puntual, usá el botón "Borrar" de esa fila y volvelo a cargar acá arriba.</p>
       </div>
     </div>`;
-  }).join("");
 }
 
 function renderPagosTab() {
@@ -1446,7 +1531,7 @@ function renderEndosoSection() {
             <td>${escapeHtml(client)}${op ? ` <span class="cell-sub">OP ${escapeHtml(op.number || op.id)}</span>` : ""}</td>
             <td>${escapeHtml(c.numero || "-")}</td>
             <td>${escapeHtml(c.banco || "-")}</td>
-            <td>${c.fechaPago || "-"}</td>
+            <td>${c.fechaPago ? fmtDDMMYY(c.fechaPago) : "-"}</td>
             <td class="num">${money(c.monto)}</td>
           </tr>`;
         }).join("")}</tbody>
@@ -1618,7 +1703,7 @@ function renderExpenses() {
   const rows = [...state.expenses].sort((a, b) => b.date.localeCompare(a.date));
   $("#expenseRows").innerHTML = rows.length ? `<tr><th>Fecha</th><th>Categoría</th><th>Descripción</th><th class="num">Monto</th><th></th></tr>
     ${rows.map((item) => `<tr>
-      <td>${item.date}</td>
+      <td>${fmtDDMMYY(item.date)}</td>
       <td>${escapeHtml(item.category)}</td>
       <td>${escapeHtml(item.description)}</td>
       <td class="num">${money(item.amount)}</td>
@@ -2037,13 +2122,17 @@ function renderInvoices() {
       ? `<input type="text" value="${escapeHtml(item.ocNumber || "")}" placeholder="N° OC" data-oc-invoice="${item.id}" class="ret-input" />`
       : `<span class="cell-sub">-</span>`;
 
-    let chequeCell, pagoCell, actionsCell;
+    let chequeCell, pagoCell, actionsCell, estadoCell;
     if (item.type === "client") {
       chequeCell = item.op
         ? `<span class="cell-sub">OP ${escapeHtml(item.op.number || item.op.id)}</span>`
         : `<span class="cell-sub">Sin OP todavía</span>`;
-      pagoCell = `<span class="cell-sub">${item.paymentDate || "-"}</span>`;
+      pagoCell = `<span class="cell-sub">${item.paymentDate ? fmtDDMMYY(item.paymentDate) : "-"}</span>`;
       actionsCell = `<button type="button" data-delete-invoice="${item.id}" title="Eliminar">Borrar</button>`;
+      // El estado de cobro de una factura de cliente ya se ve del todo en
+      // Pagos (OP -> cheques/transferencias) — mostrar acá un badge aparte
+      // era redundante y podía desactualizarse visualmente antes que la OP.
+      estadoCell = `<span class="cell-sub">Ver en Pagos</span>`;
     } else {
       const coverage = providerInvoiceCoverage(item.id);
       const directPayments = directPaymentsForInvoice(item.id);
@@ -2054,9 +2143,9 @@ function renderInvoices() {
       const isEditing = editingDirectPaymentInvoiceId === item.id;
       const falta = Math.max(0, round2(Number(item.amountGross || 0) - coverage.total));
       const directChips = directPayments.length
-        ? directPayments.map((p) => `<span class="chip">${p.fecha || "-"} · ${money(p.monto)} (${p.medio === "EFECTIVO" ? "efectivo" : "transf."}) <button type="button" class="chip-remove" data-delete-direct-payment="${p.id}" title="Borrar este pago">✕</button></span>`).join("")
+        ? directPayments.map((p) => `<span class="chip">${p.fecha ? fmtDDMMYY(p.fecha) : "-"} · ${money(p.monto)} (${p.medio === "EFECTIVO" ? "efectivo" : "transf."}) <button type="button" class="chip-remove" data-delete-direct-payment="${p.id}" title="Borrar este pago">✕</button></span>`).join("")
         : "";
-      const summaryLine = `<span class="cell-sub">Cubierto ${money(coverage.total)} / ${money(item.amountGross)}${item.paymentDate ? " · " + item.paymentDate : ""}</span>`;
+      const summaryLine = `<span class="cell-sub">Cubierto ${money(coverage.total)} / ${money(item.amountGross)}${item.paymentDate ? " · " + fmtDDMMYY(item.paymentDate) : ""}</span>`;
       pagoCell = isEditing
         ? `<div class="cheque-draft-row" style="grid-template-columns: 1fr 1fr 1fr 30px; margin:0; white-space:normal;">
             <label>Fecha<input type="date" data-direct-payment-field="fecha" data-direct-payment-invoice="${item.id}" /></label>
@@ -2072,6 +2161,7 @@ function renderInvoices() {
           ? `<button type="button" class="small cancel-edit-btn" data-direct-payment-cancel="${item.id}">Cancelar</button>`
           : `<button type="button" class="small" data-direct-payment-add="${item.id}" title="Registrar pago en efectivo o transferencia">+ Pago directo</button>`}
         <button type="button" data-delete-invoice="${item.id}" title="Eliminar">Borrar</button>`;
+      estadoCell = `<span class="status ${item.status}">${item.status}</span>`;
     }
 
     return `<tr>
@@ -2080,13 +2170,13 @@ function renderInvoices() {
       <td>${escapeHtml(location)}</td>
       <td>${escapeHtml(item.number)}</td>
       <td>${ocCell}</td>
-      <td>${item.issueDate}</td>
+      <td>${fmtDDMMYY(item.issueDate)}</td>
       <td>${nDeliveries} remito(s)</td>
       <td>${chequeCell}</td>
       <td>${pagoCell}</td>
       <td class="num">${money(item.amountGross)}</td>
       <td class="num">${money(neto)}</td>
-      <td><span class="status ${item.status}">${item.status}</span></td>
+      <td>${estadoCell}</td>
       <td>${actionsCell}</td>
     </tr>`;
   }).join("");
@@ -2248,16 +2338,17 @@ function renderInvoicePickers() {
     totalSelector: "#providerInvoiceTotal",
     form: $("#providerInvoiceForm"),
     getCandidates: (data) => {
-      if (!data.clientId || !data.locationId || !data.providerId) return [];
+      if (!data.clientId || !data.providerId) return [];
       const candidates = candidateDeliveries({ clientId: data.clientId, locationId: data.locationId, providerId: data.providerId, mode: "provider" });
       return filterByWeek(candidates, data.weekFilter);
     },
     valueFn: (t) => t.providerNet,
+    showLocation: true,
     emptyMessage: "No hay remitos listos para este proveedor todavía — recordá que primero tiene que estar cobrada la factura del cliente."
   });
 }
 
-function renderPicker({ containerSelector, totalSelector, form, getCandidates, valueFn, emptyMessage, onSelectionChange }) {
+function renderPicker({ containerSelector, totalSelector, form, getCandidates, valueFn, emptyMessage, onSelectionChange, showLocation }) {
   const container = $(containerSelector);
   const data = formValues(form);
   const candidates = getCandidates(data);
@@ -2269,14 +2360,16 @@ function renderPicker({ containerSelector, totalSelector, form, getCandidates, v
   }
 
   container.innerHTML = `<table class="picker-table">
-    <thead><tr><th></th><th>Fecha</th><th>Sem./OC</th><th>Remito</th><th>Producto</th><th class="num">Cant.</th><th class="num">Monto</th></tr></thead>
+    <thead><tr><th></th><th>Fecha</th>${showLocation ? "<th>Sala</th>" : ""}<th>Sem./OC</th><th>Remito</th><th>Producto</th><th class="num">Cant.</th><th class="num">Monto</th></tr></thead>
     <tbody>
       ${candidates.map((item) => {
         const t = totalsFor(item);
         const product = byId(state.products, item.productId)?.name || "";
+        const locationCell = showLocation ? `<td>${escapeHtml(byId(state.locations, item.locationId)?.name || "-")}</td>` : "";
         return `<tr>
           <td><input type="checkbox" class="picker-check" data-picker-id="${item.id}" checked /></td>
-          <td>${item.date}</td>
+          <td>${fmtDDMMYY(item.date)}</td>
+          ${locationCell}
           <td title="${escapeHtml(periodLabelFor(item))}">${escapeHtml(weekShortLabel(item))}</td>
           <td>${escapeHtml(item.receiptNo)}</td>
           <td>${escapeHtml(product)}</td>
@@ -2351,7 +2444,7 @@ addFromForm($("#deliveryForm"), "deliveries", (v) => {
   if (dup) {
     const product = byId(state.products, dup.productId)?.name || "";
     const loc = byId(state.locations, dup.locationId)?.name || "";
-    const confirmMsg = `Ya existe un remito ${dup.receiptNo} de este proveedor para ${loc} / ${product}, con ${dup.quantity} unidades, fecha ${dup.date}.\n\n¿Cargar igual (por ejemplo, es una corrección real)?`;
+    const confirmMsg = `Ya existe un remito ${dup.receiptNo} de este proveedor para ${loc} / ${product}, con ${dup.quantity} unidades, fecha ${fmtDDMMYY(dup.date)}.\n\n¿Cargar igual (por ejemplo, es una corrección real)?`;
     if (!confirm(confirmMsg)) return null;
   }
   return {

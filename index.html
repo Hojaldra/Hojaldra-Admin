@@ -285,12 +285,12 @@
           <form id="providerInvoiceForm">
             <h2>Factura proveedor</h2>
             <label>Cliente<select name="clientId" required></select></label>
-            <label>Sala<select name="locationId" required></select></label>
+            <label>Sala<select name="locationId"></select></label>
             <label>Proveedor<select name="providerId" required></select></label>
             <label>Semana / OC<input name="weekFilter" type="text" placeholder="Todas" /></label>
             <label>N Factura<input name="number" required /></label>
             <label>Recepcion<input name="issueDate" type="date" required /></label>
-            <label class="wide">Remitos listos para facturar (ya cobrados al cliente)
+            <label class="wide">Remitos listos para facturar (ya cobrados al cliente) — dejá "Todas las salas" arriba si el proveedor te factura consolidado
               <div class="picker-toolbar">
                 <button type="button" data-select-all="providerInvoicePicker">Marcar todos</button>
                 <button type="button" data-select-none="providerInvoicePicker">Desmarcar todos</button>
@@ -334,10 +334,15 @@
 
           <div class="toolbar" style="grid-template-columns: 1fr 1fr; margin-top:12px;">
             <label>Alícuota IVA de tus facturas (%)<input id="opIvaRate" type="number" min="0" max="100" step="0.01" value="21" /></label>
-            <label>% Retención Ganancias (sobre el neto s/IVA)<input id="opGananciasRate" type="number" min="0" max="100" step="0.01" value="6" /></label>
+            <label>% Retención Ganancias sugerido (de partida)<input id="opGananciasRate" type="number" min="0" max="100" step="0.01" value="6" /></label>
           </div>
+          <p class="legend">CrossRacer (y otros clientes) no siempre retienen el 100% del IVA ni un % fijo de Ganancias — depende de escalas de AFIP que varían de una OP a otra. Por eso las dos líneas de retención de abajo son <strong>editables</strong>: te proponen un cálculo de partida, pero pegá ahí el monto exacto que figura en el comprobante de retención de CrossRacer para que el Neto a abonar cierre siempre.</p>
 
           <div id="opBreakdown"></div>
+          <div class="toolbar" style="grid-template-columns: 1fr 1fr; margin-top:4px;">
+            <label>Retención IVA ($) — copiá el monto real del comprobante<input id="opRetIva" type="number" min="0" step="0.01" /></label>
+            <label>Retención Ganancias ($) — copiá el monto real del comprobante<input id="opRetGanancias" type="number" min="0" step="0.01" /></label>
+          </div>
 
           <h2 id="opChequeSectionTitle">2. Cargar cheques hasta cerrar el neto a abonar</h2>
           <div id="opChequeRows"></div>
@@ -350,9 +355,22 @@
         </form>
 
         <div>
-          <h2 style="margin-top:18px">3. Ordenes de pago registradas</h2>
-          <p class="legend">Click en una para ver el detalle de facturas y cheques.</p>
-          <div id="opList"></div>
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-top:18px;">
+            <h2 style="margin:0;">3. Ordenes de pago registradas</h2>
+            <button type="button" id="opListToggle" class="small">Colapsar</button>
+          </div>
+          <div id="opListBody">
+            <div class="toolbar" style="grid-template-columns: 2fr 1fr; margin-top:8px;">
+              <label>Buscar (cliente o N° de OP)<input id="opListSearch" type="text" placeholder="Ej: CrossRacer, 39101..." /></label>
+              <label>Mostrar<select id="opListFilter">
+                  <option value="all">Todas</option>
+                  <option value="open">Solo con pendientes</option>
+                  <option value="closed">Solo cerradas</option>
+                </select></label>
+            </div>
+            <p class="legend">Click en una para ver el detalle de facturas y cheques.</p>
+            <div id="opList"></div>
+          </div>
         </div>
 
         <form id="endosoForm" style="margin-top:24px; border-top:1px solid var(--line); padding-top:18px;">
