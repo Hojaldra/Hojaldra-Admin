@@ -15,11 +15,14 @@
       <div class="top-actions">
         <span id="syncStatus" class="sync-status status-cargando">Cargando...</span>
         <button id="exportBtn" type="button" title="Exportar datos">Exportar</button>
+        <label class="merge-toggle" title="Si está tildado, lo importado se suma a lo que ya tenés. Si lo destildás, borra todo y lo reemplaza.">
+          <input id="importMergeMode" type="checkbox" checked />
+          Fusionar (no borrar)
+        </label>
         <label class="file-btn" title="Importar datos">
           Importar
           <input id="importFile" type="file" accept="application/json" />
         </label>
-        <button id="resetBtn" type="button" class="danger" title="Restaurar demo">Reset</button>
       </div>
     </header>
 
@@ -37,7 +40,7 @@
           Proveedor
           <select id="providerFilter"></select>
         </label>
-        <label>Semana<input id="weekFilter" type="number" min="1" max="53" placeholder="Todas" /></label>
+        <label>Semana / OC<input id="weekFilter" type="text" placeholder="Todas" /></label>
       </section>
 
       <section class="kpis" aria-label="Resumen">
@@ -78,6 +81,7 @@
           <label>Proveedor<select name="providerId" required></select></label>
           <label>Producto<select name="productId" required></select></label>
           <label>Cantidad<input name="quantity" type="number" min="0" step="0.01" required /></label>
+          <label class="oc-wrap is-hidden">N° OC<input name="ocNumber" type="text" placeholder="si ya la tenés" /></label>
           <label class="wide">Nota<input name="note" type="text" /></label>
           <button type="submit">Agregar remito</button>
         </form>
@@ -86,26 +90,26 @@
           <table class="deliveries-table">
             <colgroup>
               <col style="width:6%">
-              <col style="width:11%">
+              <col style="width:12%">
               <col style="width:6%">
-              <col style="width:3%">
+              <col style="width:5%">
               <col style="width:7%">
               <col style="width:7%">
               <col style="width:6%">
-              <col style="width:15%">
+              <col style="width:16%">
               <col style="width:4%">
               <col style="width:8%">
               <col style="width:8%">
               <col style="width:5%">
-              <col style="width:8%">
               <col style="width:6%">
+              <col style="width:4%">
             </colgroup>
             <thead>
               <tr>
                 <th>Fecha</th>
-                <th>Semana</th>
+                <th>Semana / Período</th>
+                <th>OC</th>
                 <th>Remito</th>
-                <th></th>
                 <th>Cliente</th>
                 <th>Sala</th>
                 <th>Proveedor</th>
@@ -121,7 +125,7 @@
             <tbody id="deliveryRows"></tbody>
           </table>
         </div>
-        <p class="legend">* = no hay ningún precio cargado para ese cliente/sala/proveedor/producto todavía (revisar la pestaña Precios).</p>
+        <p class="legend">* = no hay ningún precio cargado para ese cliente/sala/proveedor/producto todavía (revisar la pestaña Precios). La columna OC solo se puede editar para clientes que facturan por orden de compra (ej. FAENA) — anotala apenas te la manden, no hace falta esperar a facturar.</p>
       </section>
 
       <section id="rules" class="panel">
@@ -140,14 +144,14 @@
           <table>
             <thead>
               <tr>
-                <th>Cliente</th>
-                <th>Sala</th>
-                <th>Proveedor</th>
-                <th>Producto</th>
-                <th>Venta s/IVA</th>
-                <th>Comision</th>
-                <th>Costo equivalente</th>
-                <th>Desde</th>
+                <th data-sort="client" class="sortable">Cliente</th>
+                <th data-sort="location" class="sortable">Sala</th>
+                <th data-sort="provider" class="sortable">Proveedor</th>
+                <th data-sort="product" class="sortable">Producto</th>
+                <th data-sort="salePrice" class="sortable num">Venta s/IVA</th>
+                <th data-sort="commissionPct" class="sortable num">Comision</th>
+                <th data-sort="cost" class="sortable num">Costo equivalente</th>
+                <th data-sort="validFrom" class="sortable">Desde</th>
                 <th></th>
               </tr>
             </thead>
@@ -213,11 +217,11 @@
       <section id="reports" class="panel">
         <div>
           <h2>Balance semanal de entregas (por producto)</h2>
-          <p class="legend">Esto es lo que le mandás al cliente junto con la factura — elegí cliente, sala y semana.</p>
+          <p class="legend">Esto es lo que le mandás al cliente junto con la factura — elegí cliente, sala y semana (u OC, si es un cliente que factura por orden de compra).</p>
           <div class="toolbar">
             <label>Cliente<select id="balanceClientId"><option value="">Elegí...</option></select></label>
             <label>Sala<select id="balanceLocationId"><option value="">Elegí...</option></select></label>
-            <label>Semana<select id="balancePeriod"><option value="">Elegí...</option></select></label>
+            <label>Semana / OC<select id="balancePeriod"><option value="">Elegí...</option></select></label>
           </div>
           <div class="table-wrap small"><table id="balanceTable"><tbody id="balanceRows"></tbody></table></div>
         </div>
@@ -228,6 +232,7 @@
           <div class="table-wrap"><table id="salaWeekTable"><tbody id="salaWeekRows"></tbody></table></div>
         </div>
         <p class="legend" id="reportGridFilterLabel"></p>
+        <p class="legend"><strong>Devengado total</strong> = todo lo entregado en el período, lo hayas cobrado/pagado o no. <strong>Pendiente</strong> = lo que todavía falta cobrar (clientes) o pagar (proveedores) — se calcula remito por remito según su estado real.</p>
         <div class="report-grid">
           <div>
             <h2>Cobrar por cliente</h2>
@@ -250,9 +255,15 @@
             <h2>Factura a cliente</h2>
             <label>Cliente<select name="clientId" required></select></label>
             <label>Sala<select name="locationId" required></select></label>
+            <label>Semana / OC<input name="weekFilter" type="text" placeholder="Todas" /></label>
             <label>N Factura<input name="number" required /></label>
+            <label class="oc-wrap is-hidden">N° OC<input name="ocNumber" type="text" placeholder="la que vas a poner en ARCA" /></label>
             <label>Emision<input name="issueDate" type="date" required /></label>
             <label class="wide">Remitos a incluir (tildá los que corresponden)
+              <div class="picker-toolbar">
+                <button type="button" data-select-all="clientInvoicePicker">Marcar todos</button>
+                <button type="button" data-select-none="clientInvoicePicker">Desmarcar todos</button>
+              </div>
               <div id="clientInvoicePicker" class="picker"></div>
             </label>
             <label>Total remitos tildados (c/IVA)<output id="clientInvoiceTotal">$0</output></label>
@@ -269,11 +280,16 @@
           <form id="providerInvoiceForm">
             <h2>Factura proveedor</h2>
             <label>Cliente<select name="clientId" required></select></label>
-            <label>Sala <span class="cell-sub" style="text-transform:none">(opcional, para consolidar varias salas)</span><select name="locationId"></select></label>
+            <label>Sala<select name="locationId" required></select></label>
             <label>Proveedor<select name="providerId" required></select></label>
+            <label>Semana / OC<input name="weekFilter" type="text" placeholder="Todas" /></label>
             <label>N Factura<input name="number" required /></label>
             <label>Recepcion<input name="issueDate" type="date" required /></label>
             <label class="wide">Remitos listos para facturar (ya cobrados al cliente)
+              <div class="picker-toolbar">
+                <button type="button" data-select-all="providerInvoicePicker">Marcar todos</button>
+                <button type="button" data-select-none="providerInvoicePicker">Desmarcar todos</button>
+              </div>
               <div id="providerInvoicePicker" class="picker"></div>
             </label>
             <label>Total remitos tildados (c/IVA)<output id="providerInvoiceTotal">$0</output></label>
@@ -288,9 +304,6 @@
           </form>
         </div>
 
-        <div class="toolbar" style="grid-template-columns:auto;justify-content:start;display:flex;align-items:center;gap:10px">
-          <p class="legend">Click en cualquier columna de la tabla para ordenar por esa columna.</p>
-        </div>
         <div class="table-wrap">
           <table>
             <tbody id="invoiceRows"></tbody>
@@ -370,7 +383,7 @@
     </main>
 
     <template id="emptyRow">
-      <tr><td colspan="14" class="empty">Sin datos para el filtro actual.</td></tr>
+      <tr><td colspan="12" class="empty">Sin datos para el filtro actual.</td></tr>
     </template>
 
     <script src="./app.js"></script>

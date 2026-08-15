@@ -100,6 +100,22 @@ h2 {
   flex-wrap: wrap;
 }
 
+.merge-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  text-transform: none;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.merge-toggle input {
+  width: auto;
+  min-height: auto;
+}
+
 main {
   padding: 22px 28px 36px;
   display: grid;
@@ -246,6 +262,24 @@ th {
   z-index: 1;
 }
 
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+th.sortable:hover {
+  color: var(--green);
+}
+
+th.sortable .sort-arrow {
+  margin-left: 4px;
+  opacity: 0.5;
+}
+
+th.sortable.sort-active .sort-arrow {
+  opacity: 1;
+}
+
 td.num,
 th.num {
   text-align: right;
@@ -328,7 +362,7 @@ li {
 }
 
 .invoice-grid {
-  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  grid-template-columns: 1fr;
 }
 
 .invoice-grid form {
@@ -345,6 +379,10 @@ li {
   grid-column: 1 / -1;
 }
 
+.invoice-grid .wide {
+  grid-column: 1 / -1;
+}
+
 output {
   display: block;
   font-weight: 700;
@@ -352,8 +390,21 @@ output {
   padding: 7px 0;
 }
 
+.picker-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+  text-transform: none;
+}
+
+.picker-toolbar button {
+  min-height: 28px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .picker {
-  max-height: 220px;
+  max-height: 480px;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -396,6 +447,11 @@ li {
   padding: 3px 8px;
   font-size: 12px;
   flex-shrink: 0;
+}
+
+.edit-btn.danger {
+  color: var(--red);
+  border-color: var(--red);
 }
 
 .cancel-edit-btn {
@@ -512,15 +568,6 @@ li {
   text-align: center;
   color: var(--muted);
   padding: 32px;
-}
-
-th.sortable {
-  cursor: pointer;
-  user-select: none;
-}
-
-th.sortable:hover {
-  color: var(--green);
 }
 
 .note-icon {
