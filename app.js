@@ -291,15 +291,32 @@ function saveState() {
 }
 
 let cloudSaveTimer = null;
+// Evita que dos guardados en la nube corran en paralelo (podían "cruzarse"
+// en la red y dejar guardada una versión vieja encima de una más nueva,
+// sin ningún aviso en pantalla). Si llega un pedido de guardado mientras
+// ya hay uno en curso, se marca "queued" en vez de disparar otro en
+// paralelo; apenas termina el que está en curso, se dispara el siguiente
+// con el estado más fresco. Nunca hay dos escrituras compitiendo.
+let cloudSaveInFlight = false;
+let cloudSaveQueued = false;
 
 function scheduleCloudSave() {
   if (!CLOUD_CONFIGURED) return;
   setSyncStatus("pendiente");
   clearTimeout(cloudSaveTimer);
-  cloudSaveTimer = setTimeout(pushCloudState, 800);
+  cloudSaveTimer = setTimeout(triggerCloudSave, 800);
+}
+
+function triggerCloudSave() {
+  if (cloudSaveInFlight) {
+    cloudSaveQueued = true;
+    return;
+  }
+  pushCloudState();
 }
 
 async function pushCloudState() {
+  cloudSaveInFlight = true;
   setSyncStatus("guardando");
   try {
     submitHiddenForm(APPS_SCRIPT_URL, {
@@ -316,12 +333,18 @@ async function pushCloudState() {
   } catch (err) {
     console.error("No se pudo confirmar el guardado en la nube (probablemente igual se guardó, revisar la Sheet):", err);
     setSyncStatus("error");
+  } finally {
+    cloudSaveInFlight = false;
+    if (cloudSaveQueued) {
+      cloudSaveQueued = false;
+      pushCloudState();
+    }
   }
 }
 
 // Si se corta y vuelve la conexión, reintenta mandar lo último.
 window.addEventListener("online", () => {
-  if (CLOUD_CONFIGURED) pushCloudState();
+  if (CLOUD_CONFIGURED) triggerCloudSave();
 });
 
 function setSyncStatus(status, savedAt) {
@@ -1099,11 +1122,20 @@ function renderBalancePanel() {
   });
 
   const allIds = groupDeliveries.map((d) => d.id);
-  const clientInvoice = state.invoices.find((inv) => inv.type === "client" && allIds.some((id) => (inv.deliveryIds || []).includes(id)));
+  // OJO: iba con .find() y solo agarraba la PRIMERA factura de cliente que
+  // tocara este grupo — si el grupo terminó repartido en dos facturas, la
+  // segunda desaparecía y encima el N° de la primera se mostraba mal
+  // pegado a filas que en realidad pertenecen a la otra. Con .filter() se
+  // buscan TODAS las que tocan el grupo, y por cada fila de producto se
+  // muestran las que realmente cubren ESOS remitos puntuales.
+  const clientInvoices = state.invoices.filter((inv) => inv.type === "client" && allIds.some((id) => (inv.deliveryIds || []).includes(id)));
 
   const rows = [...byProduct.entries()].map(([productId, data]) => {
     const productName = byId(state.products, productId)?.name || "";
-    return { productName, ...data };
+    const invoiceNumbers = clientInvoices
+      .filter((inv) => data.ids.some((id) => (inv.deliveryIds || []).includes(id)))
+      .map((inv) => inv.number);
+    return { productName, invoiceNumbers, ...data };
   }).sort((a, b) => a.productName.localeCompare(b.productName));
 
   const totalQty = rows.reduce((s, r) => s + r.qty, 0);
@@ -1118,7 +1150,7 @@ function renderBalancePanel() {
       <td class="num">${money(r.saleNet)}</td>
       <td class="num">${money(r.saleNet * (1 + IVA_RATE))}</td>
       <td>${escapeHtml([...r.remitos].join(", "))}</td>
-      <td>${clientInvoice ? escapeHtml(clientInvoice.number) : ""}</td>
+      <td>${r.invoiceNumbers.length ? escapeHtml(r.invoiceNumbers.join(", ")) : `<span class="cell-sub">sin facturar</span>`}</td>
     </tr>`).join("")}
     <tr><th>TOTAL</th><th class="num">${totalQty.toLocaleString("es-AR")}</th><th class="num">${money(totalSale)}</th><th class="num">${money(totalSale * (1 + IVA_RATE))}</th><th></th><th></th></tr>`;
 }
@@ -2129,10 +2161,10 @@ function renderInvoices() {
         : `<span class="cell-sub">Sin OP todavía</span>`;
       pagoCell = `<span class="cell-sub">${item.paymentDate ? fmtDDMMYY(item.paymentDate) : "-"}</span>`;
       actionsCell = `<button type="button" data-delete-invoice="${item.id}" title="Eliminar">Borrar</button>`;
-      // El estado de cobro de una factura de cliente ya se ve del todo en
-      // Pagos (OP -> cheques/transferencias) — mostrar acá un badge aparte
-      // era redundante y podía desactualizarse visualmente antes que la OP.
-      estadoCell = `<span class="cell-sub">Ver en Pagos</span>`;
+      // El estado se deriva de la OP (syncClientInvoiceStatuses, corre al
+      // principio de cada render()) — siempre está al día, mismo criterio
+      // visual que Proveedor.
+      estadoCell = `<span class="status ${item.status}">${item.status}</span>`;
     } else {
       const coverage = providerInvoiceCoverage(item.id);
       const directPayments = directPaymentsForInvoice(item.id);
@@ -2636,7 +2668,7 @@ addFromForm($("#clientInvoiceForm"), "invoices", (v) => {
     issueDate: v.issueDate,
     paymentDate: "",
     amountGross: computedTotal,
-    status: v.status,
+    status: "PENDIENTE",
     ocNumber
   };
 });
@@ -2659,7 +2691,7 @@ addFromForm($("#providerInvoiceForm"), "invoices", (v) => {
     issueDate: v.issueDate,
     paymentDate: "",
     amountGross: computedTotal,
-    status: v.status
+    status: "PENDIENTE"
   };
 });
 

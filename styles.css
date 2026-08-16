@@ -549,6 +549,11 @@ li {
   overflow-wrap: break-word;
 }
 
+.deliveries-table td.num,
+.deliveries-table th.num {
+  white-space: nowrap;
+}
+
 .sync-status {
   font-size: 12px;
   font-weight: 700;
