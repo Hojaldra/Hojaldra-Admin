@@ -204,8 +204,8 @@ function round2(value) {
   return Math.round(Number(value) * 100) / 100;
 }
 
-function delivery(date, receiptNo, clientId, locationId, providerId, productId, quantity, note) {
-  return { id: cryptoId(), date, receiptNo, clientId, locationId, providerId, productId, quantity, note };
+function delivery(date, receiptNo, clientId, locationId, providerId, productId, quantity, note, billingMode) {
+  return { id: cryptoId(), date, receiptNo, clientId, locationId, providerId, productId, quantity, note, billingMode: billingMode || "NORMAL" };
 }
 
 function cryptoId() {
@@ -501,7 +501,7 @@ function filteredDeliveries() {
     const inMonth = !f.month || item.date.startsWith(f.month);
     const inClient = !f.clientId || item.clientId === f.clientId;
     const inProvider = !f.providerId || item.providerId === f.providerId;
-    const inWeek = !f.week || periodKeyFor(item) === String(f.week);
+    const inWeek = !f.week || normalizeWeekFilterText(periodKeyFor(item)) === normalizeWeekFilterText(f.week);
     return inMonth && inClient && inProvider && inWeek;
   });
 }
@@ -519,13 +519,34 @@ function latestRule(item) {
   return matches[0];
 }
 
+/**
+ * Devoluciones (producto que llegó en mal estado): en vez de una entidad
+ * aparte, es un campo más del remito (billingMode) — así el remito sigue
+ * siendo la única fuente de verdad, y todo lo que ya existía (Reportes,
+ * Liquidez, Facturas) se ajusta solo con este único cambio acá, sin tener
+ * que tocar cada reporte por separado:
+ *  - NORMAL: como siempre.
+ *  - DEVOLUCION_COBRA_CLIENTE: se le cobra igual al cliente (saleNet
+ *    completo), pero nunca se le paga al proveedor (providerNet = 0) — esa
+ *    plata queda como margen extra de Hojaldra.
+ *  - DEVOLUCION_SIN_COBRO: no se le cobra a nadie ni se le paga a nadie —
+ *    todo en $0. El remito queda igual en la tabla, para que no desaparezca
+ *    del historial, pero no mueve un peso.
+ */
 function totalsFor(item) {
   const priceRule = latestRule(item);
   const quantity = Number(item.quantity) || 0;
   if (!priceRule) {
     return { saleNet: 0, providerNet: 0, profitNet: 0, ruleMissing: true };
   }
+  const billingMode = item.billingMode || "NORMAL";
+  if (billingMode === "DEVOLUCION_SIN_COBRO") {
+    return { saleNet: 0, providerNet: 0, profitNet: 0, ruleMissing: false };
+  }
   const saleNet = quantity * Number(priceRule.salePrice || 0);
+  if (billingMode === "DEVOLUCION_COBRA_CLIENTE") {
+    return { saleNet, providerNet: 0, profitNet: saleNet, ruleMissing: false };
+  }
   const providerNet = saleNet * (1 - Number(priceRule.commissionPct || 0) / 100);
   return { saleNet, providerNet, profitNet: saleNet - providerNet, ruleMissing: false };
 }
@@ -562,8 +583,15 @@ function clientPaidDeliveryIds() {
  * PENDIENTE -> FACTURADO (facturado al cliente, todavía no cobrado) ->
  * COBRADO (la sala ya pagó, esperando facturarle al proveedor) ->
  * PAGO (ya se le pagó al proveedor - circuito cerrado).
+ *
+ * SIN_COBRO es aparte: es terminal desde el minuto uno (una devolución que
+ * no se le cobra a nadie nunca va a tener factura de ningún lado), así que
+ * si no se lo sacara del flujo normal quedaría mostrando "PENDIENTE" para
+ * siempre — dando la falsa idea de que todavía hay algo por facturar.
  */
 function deliveryStatus(deliveryId) {
+  const delivery = byId(state.deliveries, deliveryId);
+  if ((delivery?.billingMode || "NORMAL") === "DEVOLUCION_SIN_COBRO") return "SIN_COBRO";
   const clientInv = state.invoices.find((i) => i.type === "client" && (i.deliveryIds || []).includes(deliveryId));
   const providerInv = state.invoices.find((i) => i.type === "provider" && (i.deliveryIds || []).includes(deliveryId));
   if (providerInv && providerInv.status === "PAGO") return "PAGO";
@@ -584,6 +612,11 @@ function candidateDeliveries({ clientId, locationId, providerId, mode }) {
   const clientPaid = mode === "provider" ? clientPaidDeliveryIds() : null;
   return state.deliveries
     .filter((item) => {
+      const billingMode = item.billingMode || "NORMAL";
+      // Sin cobro: no se ofrece nunca para facturar, ni a cliente ni a proveedor.
+      if (billingMode === "DEVOLUCION_SIN_COBRO") return false;
+      // Cobra cliente: se factura al cliente normal, pero JAMÁS se ofrece para pagarle al proveedor.
+      if (mode === "provider" && billingMode === "DEVOLUCION_COBRA_CLIENTE") return false;
       if (excluded.has(item.id)) return false;
       if (mode === "provider" && !clientPaid.has(item.id)) return false;
       if (clientId !== undefined && clientId !== "" && item.clientId !== clientId) return false;
@@ -718,6 +751,12 @@ function renderDeliveries() {
     const noteIcon = item.note
       ? `<button type="button" class="note-icon" data-note="${escapeHtml(item.note)}" title="${escapeHtml(item.note)}">📝</button>`
       : "";
+    const billingMode = item.billingMode || "NORMAL";
+    const billingModeSelect = `<select class="ret-input" data-billing-mode-delivery="${item.id}" title="Tipo de remito">
+        <option value="NORMAL"${billingMode === "NORMAL" ? " selected" : ""}>Normal</option>
+        <option value="DEVOLUCION_COBRA_CLIENTE"${billingMode === "DEVOLUCION_COBRA_CLIENTE" ? " selected" : ""}>Dev. cobra cliente</option>
+        <option value="DEVOLUCION_SIN_COBRO"${billingMode === "DEVOLUCION_SIN_COBRO" ? " selected" : ""}>Dev. sin cobro</option>
+      </select>`;
     return `<tr>
       <td>${fmtDDMMYY(item.date)}</td>
       <td>${periodCellHtml(item)}</td>
@@ -731,7 +770,7 @@ function renderDeliveries() {
       <td class="num">${money(t.saleNet)}</td>
       <td class="num">${money(t.providerNet)}</td>
       <td class="num">${money(t.profitNet)}</td>
-      <td><span class="status ${status}">${deliveryStatusLabel(status)}</span></td>
+      <td><span class="status ${status}">${deliveryStatusLabel(status)}</span>${billingModeSelect}</td>
       <td><button type="button" data-delete-delivery="${item.id}" title="Eliminar">Borrar</button></td>
     </tr>`;
   }).join("") : empty(14);
@@ -936,7 +975,16 @@ function tryDeleteCatalogItem(type, id, collectionName, label) {
 }
 
 function deliveryStatusLabel(status) {
-  return ({ PENDIENTE: "PENDIENTE", FACTURADO: "FACTURADO", COBRADO: "COBRADO", PROV_PENDIENTE: "PROV. PENDIENTE", PAGO: "PAGO" })[status] || status;
+  return ({ PENDIENTE: "PENDIENTE", FACTURADO: "FACTURADO", COBRADO: "COBRADO", PROV_PENDIENTE: "PROV. PENDIENTE", PAGO: "PAGO", SIN_COBRO: "SIN COBRO" })[status] || status;
+}
+
+/** Etiqueta corta del tipo de remito, para el selector inline de la tabla y el form de carga. */
+function billingModeLabel(mode) {
+  return ({
+    NORMAL: "Normal",
+    DEVOLUCION_COBRA_CLIENTE: "Devolución — cobra cliente",
+    DEVOLUCION_SIN_COBRO: "Devolución — sin cobro"
+  })[mode] || "Normal";
 }
 
 function dayLabel(day) {
@@ -944,7 +992,11 @@ function dayLabel(day) {
 }
 
 function renderReports() {
-  const rows = filteredDeliveries();
+  // Las devoluciones "sin cobro" no se le facturan a nadie — no tiene sentido
+  // que aparezcan acá como "pendiente de cobro/pago" ni sumen a nada. Las
+  // "cobra cliente" SÍ quedan (se le cobra al cliente normal, solo cambia
+  // del lado del proveedor, y eso ya lo resuelve totalsFor con providerNet=0).
+  const rows = filteredDeliveries().filter((item) => (item.billingMode || "NORMAL") !== "DEVOLUCION_SIN_COBRO");
   renderSalaWeekRows(rows);
   $("#reportGridFilterLabel").textContent = "Mostrando: " + activeFiltersLabel();
   renderReceivables(rows);
@@ -1108,6 +1160,9 @@ function renderBalancePanel() {
 
   const groupDeliveries = state.deliveries.filter((d) =>
     d.clientId === clientId && d.locationId === locationId && periodKeyFor(d) === period
+    // Sin cobro: nunca se le manda al cliente, ni siquiera para que vea el
+    // motivo — no forma parte de lo que se le está facturando.
+    && (d.billingMode || "NORMAL") !== "DEVOLUCION_SIN_COBRO"
   );
 
   const byProduct = new Map();
@@ -1885,6 +1940,9 @@ $("#openingBalance").addEventListener("input", (event) => {
 function renderProviderPayables(rows) {
   const map = new Map();
   rows.forEach((item) => {
+    // Cobra cliente: nunca se le paga nada al proveedor por este remito —
+    // ni siquiera vale la pena mostrar la fila en $0, directo no cuenta acá.
+    if ((item.billingMode || "NORMAL") === "DEVOLUCION_COBRA_CLIENTE") return;
     const provider = byId(state.providers, item.providerId)?.name || "";
     const period = periodLabelFor(item);
     const key = `${item.providerId}|${period}`;
@@ -2132,7 +2190,31 @@ function syncClientInvoiceStatuses() {
 let editingDirectPaymentInvoiceId = null;
 
 function renderInvoices() {
-  const rows = sortInvoiceRows((state.invoices || []).map(invoiceRowData));
+  const prevLocationFilter = $("#invoiceLocationFilter").value;
+  $("#invoiceLocationFilter").innerHTML = `<option value="">Todas</option>` + sortByName(state.locations.map((loc) => ({
+    ...loc,
+    name: `${loc.name} (${byId(state.clients, loc.clientId)?.name || ""})`
+  }))).map(optionHtml).join("");
+  if (state.locations.some((l) => l.id === prevLocationFilter)) $("#invoiceLocationFilter").value = prevLocationFilter;
+
+  const locationFilter = $("#invoiceLocationFilter").value;
+  const typeFilter = $("#invoiceTypeFilter").value;
+  const search = ($("#invoiceSearch").value || "").trim().toLowerCase();
+
+  let rows = sortInvoiceRows((state.invoices || []).map(invoiceRowData));
+  rows = rows.filter((item) => {
+    if (typeFilter && item.type !== typeFilter) return false;
+    if (locationFilter) {
+      const distinctLocations = [...new Set((item.deliveryIds || []).map((id) => byId(state.deliveries, id)?.locationId).filter(Boolean))];
+      const matchesLocation = item.locationId === locationFilter || distinctLocations.includes(locationFilter);
+      if (!matchesLocation) return false;
+    }
+    if (search) {
+      const haystack = `${item.entity} ${item.number}`.toLowerCase();
+      if (!haystack.includes(search)) return false;
+    }
+    return true;
+  });
 
   const header = `<tr>${INVOICE_COLUMNS.map((col) => {
     if (!col.field) return `<th${col.num ? ' class="num"' : ""}>${escapeHtml(col.label)}</th>`;
@@ -2317,6 +2399,11 @@ function toggleOcVisibility(form) {
   $(selector).addEventListener("change", renderRules);
 });
 
+["#invoiceLocationFilter", "#invoiceTypeFilter"].forEach((selector) => {
+  $(selector).addEventListener("change", renderInvoices);
+});
+$("#invoiceSearch").addEventListener("input", renderInvoices);
+
 ["#deliveryForm", "#ruleForm", "#clientInvoiceForm", "#providerInvoiceForm"].forEach((selector) => {
   const form = $(selector);
   form.elements.clientId.addEventListener("change", () => {
@@ -2331,9 +2418,24 @@ function toggleOcVisibility(form) {
  * tilda/destilda un remito puntual.
  */
 /** Recorta una lista de remitos candidatos a los de una semana puntual (si se cargó el filtro). */
+/**
+ * Antes exigía coincidencia exacta del texto contra el número de semana
+ * ("31" andaba, "Semana 31" no) — y como el reporte de al lado SÍ te
+ * muestra el período como "Semana 31 (28/07 - 03/08)", era muy fácil
+ * escribir eso mismo acá y que el filtro no encontrara nada, dando la
+ * falsa idea de que no había remitos para facturar. Ahora normaliza:
+ * saca espacios de más, ignora mayúsculas/minúsculas, y le da lo mismo
+ * "31", "Semana 31" o "semana31".
+ */
+function normalizeWeekFilterText(text) {
+  return String(text).trim().toLowerCase().replace(/^semana\s*/, "").trim();
+}
+
 function filterByWeek(candidates, weekFilter) {
   if (weekFilter === undefined || weekFilter === "") return candidates;
-  return candidates.filter((item) => periodKeyFor(item) === String(weekFilter));
+  const target = normalizeWeekFilterText(weekFilter);
+  if (target === "") return candidates;
+  return candidates.filter((item) => normalizeWeekFilterText(periodKeyFor(item)) === target);
 }
 
 /**
@@ -2489,6 +2591,7 @@ addFromForm($("#deliveryForm"), "deliveries", (v) => {
     productId: v.productId,
     quantity: Number(v.quantity),
     note: v.note,
+    billingMode: v.billingMode || "NORMAL",
     ocNumber: (v.ocNumber || "").trim()
   };
 });
@@ -2699,6 +2802,7 @@ addFromForm($("#providerInvoiceForm"), "invoices", (v) => {
 document.body.addEventListener("change", (event) => {
   const ocDeliveryId = event.target.dataset?.ocDelivery;
   const ocInvoiceId = event.target.dataset?.ocInvoice;
+  const billingModeDeliveryId = event.target.dataset?.billingModeDelivery;
   if (ocDeliveryId) {
     const item = byId(state.deliveries, ocDeliveryId);
     if (item) {
@@ -2710,6 +2814,25 @@ document.body.addEventListener("change", (event) => {
     const item = byId(state.invoices, ocInvoiceId);
     if (item) {
       item.ocNumber = event.target.value.trim();
+      render();
+    }
+  }
+  if (billingModeDeliveryId) {
+    const item = byId(state.deliveries, billingModeDeliveryId);
+    if (item) {
+      // Si el remito ya estaba facturado (a cliente y/o proveedor) y lo
+      // marcás como devolución ahora, avisamos — porque las facturas ya
+      // emitidas no se tocan solas, y puede quedar una factura vieja
+      // incluyendo un remito que ahora decís que no se cobra.
+      const already = deliveryStatus(item.id);
+      const newMode = event.target.value;
+      if (newMode !== "NORMAL" && already !== "PENDIENTE" && already !== "SIN_COBRO") {
+        if (!confirm(`Este remito ya está en estado "${deliveryStatusLabel(already)}" (ya tiene alguna factura). Marcarlo como devolución ahora NO va a modificar ninguna factura ya emitida — solo afecta a las próximas. ¿Seguís igual?`)) {
+          render(); // repinta para volver el <select> a su valor anterior
+          return;
+        }
+      }
+      item.billingMode = newMode;
       render();
     }
   }

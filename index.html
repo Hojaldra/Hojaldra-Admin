@@ -83,6 +83,11 @@
           <label>Cantidad<input name="quantity" type="number" min="0" step="0.01" required /></label>
           <label class="oc-wrap is-hidden">N° OC<input name="ocNumber" type="text" placeholder="si ya la tenés" /></label>
           <label class="wide">Nota<input name="note" type="text" /></label>
+          <label>Tipo<select name="billingMode">
+              <option value="NORMAL">Normal</option>
+              <option value="DEVOLUCION_COBRA_CLIENTE">Devolución — cobro al cliente</option>
+              <option value="DEVOLUCION_SIN_COBRO">Devolución — no cobro a nadie</option>
+            </select></label>
           <button type="submit">Agregar remito</button>
         </form>
 
@@ -293,6 +298,16 @@
             <label>Total remitos tildados (c/IVA)<output id="providerInvoiceTotal">$0</output></label>
             <button type="submit">Registrar factura</button>
           </form>
+        </div>
+
+        <div class="toolbar" style="grid-template-columns: repeat(3, minmax(160px, 1fr));">
+          <label>Filtrar por Sala<select id="invoiceLocationFilter"><option value="">Todas</option></select></label>
+          <label>Filtrar por Tipo<select id="invoiceTypeFilter">
+              <option value="">Cliente y Proveedor</option>
+              <option value="client">Solo Cliente</option>
+              <option value="provider">Solo Proveedor</option>
+            </select></label>
+          <label>Buscar (cliente, proveedor o N° factura)<input id="invoiceSearch" type="text" placeholder="Ej: CrossRacer, 0006..." /></label>
         </div>
 
         <div class="table-wrap">

@@ -358,6 +358,11 @@ th.num {
   color: #46358a;
 }
 
+.status.SIN_COBRO {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
 .catalog-grid {
   grid-template-columns: repeat(4, minmax(200px, 1fr));
 }
