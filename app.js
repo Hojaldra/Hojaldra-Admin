@@ -491,6 +491,7 @@ function activeFilters() {
     month: $("#monthFilter").value,
     clientId: $("#clientFilter").value,
     providerId: $("#providerFilter").value,
+    locationId: $("#locationFilter").value,
     week: $("#weekFilter").value
   };
 }
@@ -501,8 +502,9 @@ function filteredDeliveries() {
     const inMonth = !f.month || item.date.startsWith(f.month);
     const inClient = !f.clientId || item.clientId === f.clientId;
     const inProvider = !f.providerId || item.providerId === f.providerId;
+    const inLocation = !f.locationId || item.locationId === f.locationId;
     const inWeek = !f.week || normalizeWeekFilterText(periodKeyFor(item)) === normalizeWeekFilterText(f.week);
-    return inMonth && inClient && inProvider && inWeek;
+    return inMonth && inClient && inProvider && inLocation && inWeek;
   });
 }
 
@@ -630,7 +632,8 @@ function candidateDeliveries({ clientId, locationId, providerId, mode }) {
 function renderOptions() {
   const selected = {
     clientFilter: $("#clientFilter").value,
-    providerFilter: $("#providerFilter").value
+    providerFilter: $("#providerFilter").value,
+    locationFilter: $("#locationFilter").value
   };
 
   fillSelects("provider", sortByName(state.providers));
@@ -645,6 +648,12 @@ function renderOptions() {
   $("#providerFilter").innerHTML = `<option value="">Todos</option>${sortByName(state.providers).map(optionHtml).join("")}`;
   $("#clientFilter").value = selected.clientFilter;
   $("#providerFilter").value = selected.providerFilter;
+
+  $("#locationFilter").innerHTML = `<option value="">Todas</option>${sortByName(state.locations.map((loc) => ({
+    ...loc,
+    name: `${loc.name} (${byId(state.clients, loc.clientId)?.name || ""})`
+  }))).map(optionHtml).join("")}`;
+  $("#locationFilter").value = selected.locationFilter;
 
   filterLocationSelectByClient($("#deliveryForm"));
   filterLocationSelectByClient($("#ruleForm"));
@@ -2391,7 +2400,7 @@ function toggleOcVisibility(form) {
   ocWrap.classList.toggle("is-hidden", client?.billingCycle !== "po");
 }
 
-["#monthFilter", "#clientFilter", "#providerFilter", "#weekFilter"].forEach((selector) => {
+["#monthFilter", "#clientFilter", "#providerFilter", "#locationFilter", "#weekFilter"].forEach((selector) => {
   $(selector).addEventListener("change", render);
 });
 
@@ -3054,7 +3063,6 @@ function slug(value) {
 async function boot() {
   setSyncStatus("cargando");
   state = await loadState();
-  $("#monthFilter").value = "2026-07";
   setDefaultDates();
   render();
 }

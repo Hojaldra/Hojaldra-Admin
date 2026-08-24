@@ -132,7 +132,7 @@ main {
 }
 
 .toolbar {
-  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  grid-template-columns: repeat(5, minmax(160px, 1fr));
   background: var(--surface);
   padding: 14px;
   border: 1px solid var(--line);
