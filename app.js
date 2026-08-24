@@ -571,11 +571,27 @@ function providerInvoicedDeliveryIds() {
   return set;
 }
 
-/** IDs de remito cuya factura de cliente ya está PAGA (recién ahí se le puede avisar al proveedor). */
-function clientPaidDeliveryIds() {
+/**
+ * IDs de remito cuya factura de cliente ya tiene la plata "en mano": hay
+ * cheque(s) cargados en su OP que cubren el neto a abonar, sin importar si
+ * todavía están RECIBIDO, ya ACREDITADO o ya ENDOSADO (los RECHAZADO no
+ * cuentan, esos no son plata real). A diferencia de clientPaidDeliveryIds,
+ * NO exige que el cheque ya esté resuelto — eso es una decisión posterior
+ * (depositarlo o endosarlo) que no debería trabar el aviso al proveedor.
+ * Es el gate que usa candidateDeliveries(mode="provider") para habilitar la
+ * factura de proveedor y así poder endosarle un cheque recién recibido.
+ */
+function clientCollectedDeliveryIds() {
   const set = new Set();
   state.invoices.forEach((inv) => {
-    if (inv.type === "client" && inv.status === "PAGO") (inv.deliveryIds || []).forEach((id) => set.add(id));
+    if (inv.type !== "client") return;
+    const op = clientInvoiceOP(inv.id);
+    if (!op) return;
+    const checks = opChecks(op).filter((c) => c.status !== "RECHAZADO");
+    if (!checks.length) return;
+    const total = round2(checks.reduce((sum, c) => sum + Number(c.monto || 0), 0));
+    const closeEnough = Math.abs(total - opBreakdown(op).netoAAbonar) < 1;
+    if (closeEnough) (inv.deliveryIds || []).forEach((id) => set.add(id));
   });
   return set;
 }
@@ -605,13 +621,13 @@ function deliveryStatus(deliveryId) {
 
 /**
  * Candidatos a facturar. mode="client": remitos sin factura de cliente
- * todavía. mode="provider": remitos cuya factura de CLIENTE ya está PAGA
- * (recién ahí se le puede avisar al proveedor) y que todavía no tienen
- * factura de proveedor.
+ * todavía. mode="provider": remitos cuya factura de CLIENTE ya tiene el
+ * cheque en mano (clientCollectedDeliveryIds — no hace falta que esté
+ * resuelto todavía) y que todavía no tienen factura de proveedor.
  */
 function candidateDeliveries({ clientId, locationId, providerId, mode }) {
   const excluded = mode === "provider" ? providerInvoicedDeliveryIds() : clientInvoicedDeliveryIds();
-  const clientPaid = mode === "provider" ? clientPaidDeliveryIds() : null;
+  const clientPaid = mode === "provider" ? clientCollectedDeliveryIds() : null;
   return state.deliveries
     .filter((item) => {
       const billingMode = item.billingMode || "NORMAL";
