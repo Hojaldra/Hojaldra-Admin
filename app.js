@@ -193,7 +193,7 @@ function wait(ms) {
 // venta s/IVA. Los que antes venían como "costo proveedor" se convierten acá
 // mismo: comisión% = (venta - costo) / venta * 100.
 function rule(clientId, locationId, providerId, productId, salePrice, commissionPct, validFrom) {
-  return { id: cryptoId(), clientId, locationId, providerId, productId, salePrice, commissionPct: round2(commissionPct), validFrom };
+  return { id: cryptoId(), clientId, locationId, providerId, productId, salePrice, commissionPct: round4(commissionPct), validFrom };
 }
 
 function commissionFromCost(salePrice, providerCost) {
@@ -202,6 +202,17 @@ function commissionFromCost(salePrice, providerCost) {
 
 function round2(value) {
   return Math.round(Number(value) * 100) / 100;
+}
+
+/**
+ * Igual que round2 pero a 4 decimales. Se usa para guardar commissionPct:
+ * si redondeamos el % a solo 2 decimales (ej: 18.18%) y después
+ * recalculamos el costo desde ese % redondeado, aparecen diferencias de
+ * varios centavos (ej: $4500 -> $4500.10). Guardando el % con más
+ * precisión el costo recalculado vuelve a cerrar contra el costo real.
+ */
+function round4(value) {
+  return Math.round(Number(value) * 10000) / 10000;
 }
 
 function delivery(date, receiptNo, clientId, locationId, providerId, productId, quantity, note, billingMode) {
@@ -270,7 +281,7 @@ function safeParse(raw) {
 function migrateRuleToCommission(item) {
   if (item.marginMode === "cost") {
     const { marginMode, providerCost, ...rest } = item;
-    return { ...rest, commissionPct: round2(commissionFromCost(item.salePrice, item.providerCost)) };
+    return { ...rest, commissionPct: round4(commissionFromCost(item.salePrice, item.providerCost)) };
   }
   if (item.marginMode === "commission") {
     const { marginMode, providerCost, ...rest } = item;
@@ -904,7 +915,7 @@ function renderRules() {
       <td>${escapeHtml(provider)}</td>
       <td>${escapeHtml(product)}</td>
       <td class="num">${money(item.salePrice)}</td>
-      <td class="num">${item.commissionPct}%</td>
+      <td class="num">${Number(item.commissionPct || 0).toFixed(2)}%</td>
       <td class="num">${money(item.salePrice * (1 - Number(item.commissionPct || 0) / 100))}</td>
       <td>${item.validFrom}</td>
       <td><button type="button" data-delete-rule="${item.id}" title="Eliminar">Borrar</button></td>
@@ -2621,16 +2632,59 @@ addFromForm($("#deliveryForm"), "deliveries", (v) => {
   };
 });
 
-addFromForm($("#ruleForm"), "priceRules", (v) => ({
-  id: cryptoId(),
-  clientId: v.clientId,
-  locationId: v.locationId,
-  providerId: v.providerId,
-  productId: v.productId,
-  salePrice: Number(v.salePrice),
-  commissionPct: round2(Number(v.commissionPct || 0)),
-  validFrom: v.validFrom
-}));
+addFromForm($("#ruleForm"), "priceRules", (v) => {
+  const salePrice = Number(v.salePrice);
+  // Si cargó el costo real del proveedor, la comisión % se calcula desde
+  // ahí con precisión completa (evita que redondee el % a mano y pierda
+  // centavos, ej: $4500 de costo -> 18.1818...% en vez de 18.18%).
+  const commissionPct = v.providerCost
+    ? round4(commissionFromCost(salePrice, Number(v.providerCost)))
+    : round4(Number(v.commissionPct || 0));
+  return {
+    id: cryptoId(),
+    clientId: v.clientId,
+    locationId: v.locationId,
+    providerId: v.providerId,
+    productId: v.productId,
+    salePrice,
+    commissionPct,
+    validFrom: v.validFrom
+  };
+});
+
+/**
+ * Sincroniza en vivo Costo proveedor <-> Comision % en el form de precios,
+ * para que Yamila pueda cargar el que tenga a mano y el otro se calcule
+ * solo, con precisión completa (no a mano con calculadora).
+ */
+(function setupRuleCostSync() {
+  const form = $("#ruleForm");
+  if (!form) return;
+  const saleInput = form.querySelector('[name="salePrice"]');
+  const costInput = form.querySelector('[name="providerCost"]');
+  const pctInput = form.querySelector('[name="commissionPct"]');
+  if (!saleInput || !costInput || !pctInput) return;
+
+  costInput.addEventListener("input", () => {
+    const sale = Number(saleInput.value);
+    const cost = Number(costInput.value);
+    if (sale > 0 && costInput.value !== "") {
+      pctInput.value = round4(commissionFromCost(sale, cost));
+    }
+  });
+
+  pctInput.addEventListener("input", () => {
+    const sale = Number(saleInput.value);
+    const pct = Number(pctInput.value);
+    if (sale > 0 && pctInput.value !== "") {
+      costInput.value = round2(sale * (1 - pct / 100));
+    }
+  });
+
+  form.addEventListener("reset", () => {
+    setTimeout(() => { costInput.value = ""; }, 0);
+  });
+})();
 
 /**
  * Como addFromForm, pero si el form tiene un editingId activo, actualiza
