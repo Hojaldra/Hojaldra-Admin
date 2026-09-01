@@ -193,7 +193,7 @@ function wait(ms) {
 // venta s/IVA. Los que antes venían como "costo proveedor" se convierten acá
 // mismo: comisión% = (venta - costo) / venta * 100.
 function rule(clientId, locationId, providerId, productId, salePrice, commissionPct, validFrom) {
-  return { id: cryptoId(), clientId, locationId, providerId, productId, salePrice, commissionPct: round4(commissionPct), validFrom };
+  return { id: cryptoId(), clientId, locationId, providerId, productId, salePrice, commissionPct: round2(commissionPct), validFrom };
 }
 
 function commissionFromCost(salePrice, providerCost) {
@@ -202,17 +202,6 @@ function commissionFromCost(salePrice, providerCost) {
 
 function round2(value) {
   return Math.round(Number(value) * 100) / 100;
-}
-
-/**
- * Igual que round2 pero a 4 decimales. Se usa para guardar commissionPct:
- * si redondeamos el % a solo 2 decimales (ej: 18.18%) y después
- * recalculamos el costo desde ese % redondeado, aparecen diferencias de
- * varios centavos (ej: $4500 -> $4500.10). Guardando el % con más
- * precisión el costo recalculado vuelve a cerrar contra el costo real.
- */
-function round4(value) {
-  return Math.round(Number(value) * 10000) / 10000;
 }
 
 function delivery(date, receiptNo, clientId, locationId, providerId, productId, quantity, note, billingMode) {
@@ -281,7 +270,7 @@ function safeParse(raw) {
 function migrateRuleToCommission(item) {
   if (item.marginMode === "cost") {
     const { marginMode, providerCost, ...rest } = item;
-    return { ...rest, commissionPct: round4(commissionFromCost(item.salePrice, item.providerCost)) };
+    return { ...rest, commissionPct: round2(commissionFromCost(item.salePrice, item.providerCost)) };
   }
   if (item.marginMode === "commission") {
     const { marginMode, providerCost, ...rest } = item;
@@ -586,8 +575,8 @@ function providerInvoicedDeliveryIds() {
  * IDs de remito cuya factura de cliente ya tiene la plata "en mano": hay
  * cheque(s) cargados en su OP que cubren el neto a abonar, sin importar si
  * todavía están RECIBIDO, ya ACREDITADO o ya ENDOSADO (los RECHAZADO no
- * cuentan, esos no son plata real). A diferencia de clientPaidDeliveryIds,
- * NO exige que el cheque ya esté resuelto — eso es una decisión posterior
+ * cuentan, esos no son plata real). A diferencia del estado PAGO de la
+ * factura de cliente, esta función NO exige que el cheque ya esté resuelto — eso es una decisión posterior
  * (depositarlo o endosarlo) que no debería trabar el aviso al proveedor.
  * Es el gate que usa candidateDeliveries(mode="provider") para habilitar la
  * factura de proveedor y así poder endosarle un cheque recién recibido.
@@ -915,7 +904,7 @@ function renderRules() {
       <td>${escapeHtml(provider)}</td>
       <td>${escapeHtml(product)}</td>
       <td class="num">${money(item.salePrice)}</td>
-      <td class="num">${Number(item.commissionPct || 0).toFixed(2)}%</td>
+      <td class="num">${item.commissionPct}%</td>
       <td class="num">${money(item.salePrice * (1 - Number(item.commissionPct || 0) / 100))}</td>
       <td>${item.validFrom}</td>
       <td><button type="button" data-delete-rule="${item.id}" title="Eliminar">Borrar</button></td>
@@ -1301,31 +1290,20 @@ function renderOpInvoicePicker() {
 }
 
 /**
- * Desglose "en vivo" de la OP que se está armando. Los $ de retención IVA y
- * Ganancias se leen directo de los inputs editables (#opRetIva / #opRetGanancias)
- * — si están vacíos (recién arrancando la OP), se les propone un cálculo de
- * partida a partir del %, pero apenas el usuario tipea algo ahí, eso manda
- * y ya no se vuelve a pisar solo, porque el % nunca representa exactamente
- * lo que CrossRacer termina reteniendo (varía de OP a OP).
+ * Desglose "en vivo" de la OP que se está armando. Retención IVA y Ganancias
+ * se leen directo de los inputs $ (#opRetIva / #opRetGanancias) — no hay
+ * cálculo automático a partir de ningún %, porque el % nunca representa
+ * exactamente lo que el cliente termina reteniendo (varía de OP a OP). Se
+ * carga a mano el monto real del comprobante; si esa OP no tiene esa
+ * retención, se deja en 0.
  */
 function draftOpBreakdown() {
   const invoiceIds = opSelectedInvoiceIds();
   const totalGross = round2(invoiceIds.reduce((sum, id) => sum + Number(byId(state.invoices, id)?.amountGross || 0), 0));
-  const ivaInvoiceRatePct = Number($("#opIvaRate").value || IVA_RATE * 100);
-  const netoSIva = round2(totalGross / (1 + ivaInvoiceRatePct / 100));
-  const autoRetIva = round2(totalGross - netoSIva);
-  const gananciasRatePct = Number($("#opGananciasRate").value || 0);
-  const autoRetGanancias = round2(netoSIva * (gananciasRatePct / 100));
-
-  const retIvaInput = $("#opRetIva");
-  const retGananciasInput = $("#opRetGanancias");
-  if (retIvaInput && retIvaInput.value === "") retIvaInput.value = autoRetIva;
-  if (retGananciasInput && retGananciasInput.value === "") retGananciasInput.value = autoRetGanancias;
-
-  const retIva = round2(Number(retIvaInput?.value || autoRetIva));
-  const retGanancias = round2(Number(retGananciasInput?.value || autoRetGanancias));
+  const retIva = round2(Number($("#opRetIva")?.value || 0));
+  const retGanancias = round2(Number($("#opRetGanancias")?.value || 0));
   const netoAAbonar = round2(totalGross - retIva - retGanancias);
-  return { totalGross, netoSIva, autoRetIva, autoRetGanancias, retIva, retGanancias, netoAAbonar, ivaInvoiceRatePct, gananciasRatePct };
+  return { totalGross, retIva, retGanancias, netoAAbonar };
 }
 
 function renderOpBreakdown() {
@@ -1334,10 +1312,9 @@ function renderOpBreakdown() {
     <table class="breakdown-table">
       <tbody>
         <tr><td>1. Total facturas tildadas (c/IVA)</td><td class="num">${money(b.totalGross)}</td></tr>
-        <tr><td>2. Neto s/IVA (÷ ${(1 + b.ivaInvoiceRatePct / 100).toFixed(2)})</td><td class="num">${money(b.netoSIva)}</td></tr>
-        <tr><td>3. Retención IVA <span class="cell-sub">(cálculo de partida: ${money(b.autoRetIva)} · 100% del IVA — pisalo abajo con el real)</span></td><td class="num">−${money(b.retIva)}</td></tr>
-        <tr><td>4. Retención Ganancias <span class="cell-sub">(cálculo de partida: ${money(b.autoRetGanancias)} al ${b.gananciasRatePct}% — pisalo abajo con el real)</span></td><td class="num">−${money(b.retGanancias)}</td></tr>
-        <tr class="total"><td>5. Neto a abonar</td><td class="num">${money(b.netoAAbonar)}</td></tr>
+        <tr><td>2. Retención IVA</td><td class="num">−${money(b.retIva)}</td></tr>
+        <tr><td>3. Retención Ganancias</td><td class="num">−${money(b.retGanancias)}</td></tr>
+        <tr class="total"><td>4. Neto a abonar</td><td class="num">${money(b.netoAAbonar)}</td></tr>
       </tbody>
     </table>
   </div>`;
@@ -1403,7 +1380,7 @@ $("#opMetodo").addEventListener("change", () => {
   renderOpChequeRows();
   renderOpChequeSummary();
 });
-["#opIvaRate", "#opGananciasRate", "#opRetIva", "#opRetGanancias"].forEach((sel) => $(sel).addEventListener("input", renderOpBreakdown));
+["#opRetIva", "#opRetGanancias"].forEach((sel) => $(sel).addEventListener("input", renderOpBreakdown));
 
 $("#opAddChequeBtn").addEventListener("click", () => {
   // Se propone como monto lo que todavía falta cubrir del neto a abonar
@@ -1456,13 +1433,10 @@ $("#opForm").addEventListener("submit", (event) => {
     date: new Date().toISOString().slice(0, 10),
     invoiceIds,
     metodo,
-    ivaInvoiceRatePct: Number($("#opIvaRate").value || IVA_RATE * 100),
-    gananciasRatePct: Number($("#opGananciasRate").value || 0),
     // Los montos de retención que realmente valen son estos dos — los que
-    // quedaron cargados en los campos editables (auto-calculados si el
-    // usuario no los tocó, o pegados a mano desde el comprobante real de
-    // CrossRacer si no cerraban con el %). opBreakdown() los usa siempre
-    // que estén presentes, en vez de recalcular con el %.
+    // el usuario cargó a mano leyendo el comprobante real. opBreakdown()
+    // los usa siempre que estén presentes (siempre, desde que se sacó el
+    // cálculo automático a partir de un %), en vez de recalcular con un %.
     manualRetIva: draftOpBreakdown().retIva,
     manualRetGanancias: draftOpBreakdown().retGanancias
   };
@@ -1484,8 +1458,6 @@ $("#opForm").addEventListener("submit", (event) => {
   });
   opDraftChecks = [];
   $("#opForm").reset();
-  $("#opIvaRate").value = IVA_RATE * 100;
-  $("#opGananciasRate").value = 6;
   renderOpChequeRows();
   render();
 });
@@ -1982,19 +1954,20 @@ function renderProviderPayables(rows) {
     const provider = byId(state.providers, item.providerId)?.name || "";
     const period = periodLabelFor(item);
     const key = `${item.providerId}|${period}`;
-    const current = map.get(key) || { provider, period, total: 0, pending: 0 };
+    const current = map.get(key) || { provider, period, total: 0, pending: 0, receiptNos: [] };
     const gross = totalsFor(item).providerNet * (1 + IVA_RATE);
     current.total += gross;
     if (deliveryStatus(item.id) !== "PAGO") current.pending += gross;
+    if (item.receiptNo && !current.receiptNos.includes(item.receiptNo)) current.receiptNos.push(item.receiptNo);
     map.set(key, current);
   });
   const grouped = [...map.values()].sort((a, b) => a.provider.localeCompare(b.provider));
   const total = grouped.reduce((sum, item) => sum + item.total, 0);
   const totalPending = grouped.reduce((sum, item) => sum + item.pending, 0);
   $("#payableRows").innerHTML = grouped.length
-    ? `<tr><th>Proveedor</th><th>Periodo</th><th class="num">Devengado c/IVA</th><th class="num">Pendiente de pago</th></tr>
-      ${grouped.map((item) => `<tr><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.period)}</td><td class="num">${money(item.total)}</td><td class="num">${money(item.pending)}</td></tr>`).join("")}
-      <tr><th colspan="2">Total proveedores</th><th class="num">${money(total)}</th><th class="num">${money(totalPending)}</th></tr>`
+    ? `<tr><th>Proveedor</th><th>Periodo</th><th>Remitos</th><th class="num">Devengado c/IVA</th><th class="num">Pendiente de pago</th></tr>
+      ${grouped.map((item) => `<tr><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.period)}</td><td>${escapeHtml(item.receiptNos.join(", "))}</td><td class="num">${money(item.total)}</td><td class="num">${money(item.pending)}</td></tr>`).join("")}
+      <tr><th colspan="3">Total proveedores</th><th class="num">${money(total)}</th><th class="num">${money(totalPending)}</th></tr>`
     : `<tr><td class="empty">Sin datos.</td></tr>`;
 }
 
@@ -2632,59 +2605,16 @@ addFromForm($("#deliveryForm"), "deliveries", (v) => {
   };
 });
 
-addFromForm($("#ruleForm"), "priceRules", (v) => {
-  const salePrice = Number(v.salePrice);
-  // Si cargó el costo real del proveedor, la comisión % se calcula desde
-  // ahí con precisión completa (evita que redondee el % a mano y pierda
-  // centavos, ej: $4500 de costo -> 18.1818...% en vez de 18.18%).
-  const commissionPct = v.providerCost
-    ? round4(commissionFromCost(salePrice, Number(v.providerCost)))
-    : round4(Number(v.commissionPct || 0));
-  return {
-    id: cryptoId(),
-    clientId: v.clientId,
-    locationId: v.locationId,
-    providerId: v.providerId,
-    productId: v.productId,
-    salePrice,
-    commissionPct,
-    validFrom: v.validFrom
-  };
-});
-
-/**
- * Sincroniza en vivo Costo proveedor <-> Comision % en el form de precios,
- * para que Yamila pueda cargar el que tenga a mano y el otro se calcule
- * solo, con precisión completa (no a mano con calculadora).
- */
-(function setupRuleCostSync() {
-  const form = $("#ruleForm");
-  if (!form) return;
-  const saleInput = form.querySelector('[name="salePrice"]');
-  const costInput = form.querySelector('[name="providerCost"]');
-  const pctInput = form.querySelector('[name="commissionPct"]');
-  if (!saleInput || !costInput || !pctInput) return;
-
-  costInput.addEventListener("input", () => {
-    const sale = Number(saleInput.value);
-    const cost = Number(costInput.value);
-    if (sale > 0 && costInput.value !== "") {
-      pctInput.value = round4(commissionFromCost(sale, cost));
-    }
-  });
-
-  pctInput.addEventListener("input", () => {
-    const sale = Number(saleInput.value);
-    const pct = Number(pctInput.value);
-    if (sale > 0 && pctInput.value !== "") {
-      costInput.value = round2(sale * (1 - pct / 100));
-    }
-  });
-
-  form.addEventListener("reset", () => {
-    setTimeout(() => { costInput.value = ""; }, 0);
-  });
-})();
+addFromForm($("#ruleForm"), "priceRules", (v) => ({
+  id: cryptoId(),
+  clientId: v.clientId,
+  locationId: v.locationId,
+  providerId: v.providerId,
+  productId: v.productId,
+  salePrice: Number(v.salePrice),
+  commissionPct: round2(Number(v.commissionPct || 0)),
+  validFrom: v.validFrom
+}));
 
 /**
  * Como addFromForm, pero si el form tiene un editingId activo, actualiza

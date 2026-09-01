@@ -144,8 +144,7 @@
           <label>Proveedor<select name="providerId" required></select></label>
           <label>Producto<select name="productId" required></select></label>
           <label>Venta s/IVA<input name="salePrice" type="number" min="0" step="0.01" required /></label>
-          <label>Costo proveedor (opcional)<input name="providerCost" type="number" min="0" step="0.01" placeholder="ej: 4500.00" /></label>
-          <label>Comision %<input name="commissionPct" type="number" min="0" max="100" step="0.0001" required /></label>
+          <label>Comision %<input name="commissionPct" type="number" min="0" max="100" step="0.01" required /></label>
           <label>Vigente desde<input name="validFrom" type="date" required /></label>
           <button type="submit">Guardar precio</button>
         </form>
@@ -338,11 +337,7 @@
           <p class="legend">Tildá las facturas de cliente pendientes de cobro — de cualquier sala y cualquier semana.</p>
           <div id="opInvoicePicker" class="picker"></div>
 
-          <div class="toolbar" style="grid-template-columns: 1fr 1fr; margin-top:12px;">
-            <label>Alícuota IVA de tus facturas (%)<input id="opIvaRate" type="number" min="0" max="100" step="0.01" value="21" /></label>
-            <label>% Retención Ganancias sugerido (de partida)<input id="opGananciasRate" type="number" min="0" max="100" step="0.01" value="6" /></label>
-          </div>
-          <p class="legend">CrossRacer (y otros clientes) no siempre retienen el 100% del IVA ni un % fijo de Ganancias — depende de escalas de AFIP que varían de una OP a otra. Por eso las dos líneas de retención de abajo son <strong>editables</strong>: te proponen un cálculo de partida, pero pegá ahí el monto exacto que figura en el comprobante de retención de CrossRacer para que el Neto a abonar cierre siempre.</p>
+          <p class="legend">CrossRacer (y otros clientes) no siempre retienen el 100% del IVA ni un % fijo de Ganancias — depende de escalas de AFIP que varían de una OP a otra. Poné directamente el monto real que figura en el comprobante de retención (dejá en 0 si esa OP no tiene esa retención).</p>
 
           <div id="opBreakdown"></div>
           <div class="toolbar" style="grid-template-columns: 1fr 1fr; margin-top:4px;">
