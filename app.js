@@ -63,17 +63,17 @@ const seed = {
     rule("freshfood", "freshfood", "cp", "mini_croix", 290, 10, "2026-01-01"),
     rule("faena", "faena", "cp", "med_mt", 520, 10, "2026-01-01"),
     rule("faena", "faena", "cp", "pan_campo", 1650, 10, "2026-01-01"),
-    rule("aeroparque", "aep", "cp", "med_mt", 490, commissionFromCost(490, 380), "2026-01-01"),
-    rule("aeroparque", "aep", "cp", "med_grasa", 490, commissionFromCost(490, 380), "2026-01-01"),
-    rule("ezeiza", "ezemis", "cp", "med_mt", 490, commissionFromCost(490, 380), "2026-01-01"),
-    rule("crossracer", "ameo", "cp", "med_mt", 520, commissionFromCost(520, 380), "2026-01-01"),
-    rule("crossracer", "ameo", "cp", "sant_mt", 950, commissionFromCost(950, 825), "2026-01-01"),
-    rule("crossracer", "ameo", "cp", "minion", 5400, commissionFromCost(5400, 4500), "2026-01-01"),
-    rule("crossracer", "latam", "cp", "sant_mt", 950, commissionFromCost(950, 825), "2026-01-01"),
-    rule("crossracer", "visa", "cp", "med_mt", 520, commissionFromCost(520, 380), "2026-01-01"),
-    rule("crossracer", "bbva", "cp", "med_mt", 520, commissionFromCost(520, 380), "2026-01-01"),
-    rule("crossracer", "star", "cp", "med_mt", 520, commissionFromCost(520, 380), "2026-01-01"),
-    rule("crossracer", "ezeizalounge", "cp", "med_mt", 520, commissionFromCost(520, 380), "2026-01-01")
+    ruleFromCost("aeroparque", "aep", "cp", "med_mt", 490, 380, "2026-01-01"),
+    ruleFromCost("aeroparque", "aep", "cp", "med_grasa", 490, 380, "2026-01-01"),
+    ruleFromCost("ezeiza", "ezemis", "cp", "med_mt", 490, 380, "2026-01-01"),
+    ruleFromCost("crossracer", "ameo", "cp", "med_mt", 520, 380, "2026-01-01"),
+    ruleFromCost("crossracer", "ameo", "cp", "sant_mt", 950, 825, "2026-01-01"),
+    ruleFromCost("crossracer", "ameo", "cp", "minion", 5400, 4500, "2026-01-01"),
+    ruleFromCost("crossracer", "latam", "cp", "sant_mt", 950, 825, "2026-01-01"),
+    ruleFromCost("crossracer", "visa", "cp", "med_mt", 520, 380, "2026-01-01"),
+    ruleFromCost("crossracer", "bbva", "cp", "med_mt", 520, 380, "2026-01-01"),
+    ruleFromCost("crossracer", "star", "cp", "med_mt", 520, 380, "2026-01-01"),
+    ruleFromCost("crossracer", "ezeizalounge", "cp", "med_mt", 520, 380, "2026-01-01")
   ],
   deliveries: [
     delivery("2026-07-27", "782", "crossracer", "ameo", "cp", "med_mt", 100, "foto r782"),
@@ -189,11 +189,27 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Todos los precios se expresan en una sola métrica: comisión % sobre la
-// venta s/IVA. Los que antes venían como "costo proveedor" se convierten acá
-// mismo: comisión% = (venta - costo) / venta * 100.
+// rule(): comisión % conocida directamente (no hay costo exacto en pesos
+// para esa regla). ruleFromCost(): costo real del proveedor conocido — se
+// guarda tal cual, sin pasar por ningún redondeo, y es la fuente de verdad
+// para calcular plata (ver totalsFor). La comisión % en ambos casos queda
+// como dato de referencia/visualización.
 function rule(clientId, locationId, providerId, productId, salePrice, commissionPct, validFrom) {
   return { id: cryptoId(), clientId, locationId, providerId, productId, salePrice, commissionPct: round4(commissionPct), validFrom };
+}
+
+function ruleFromCost(clientId, locationId, providerId, productId, salePrice, providerCost, validFrom) {
+  return {
+    id: cryptoId(),
+    clientId,
+    locationId,
+    providerId,
+    productId,
+    salePrice,
+    providerCost,
+    commissionPct: round4(commissionFromCost(salePrice, providerCost)),
+    validFrom
+  };
 }
 
 function commissionFromCost(salePrice, providerCost) {
@@ -275,12 +291,14 @@ function safeParse(raw) {
 
 /**
  * Migración de datos viejos: si en localStorage todavía hay reglas con
- * marginMode "cost" (de antes de unificar la métrica), las convierte a
- * comisión % equivalente al vuelo, una sola vez.
+ * marginMode "cost" (de antes de unificar la métrica), les recalcula la
+ * comisión % de referencia y LES CONSERVA el costo real — antes esta
+ * función lo borraba, que es lo que causaba los centavos de diferencia
+ * (se perdía el dato exacto y quedaba solo el % redondeado).
  */
 function migrateRuleToCommission(item) {
   if (item.marginMode === "cost") {
-    const { marginMode, providerCost, ...rest } = item;
+    const { marginMode, ...rest } = item;
     return { ...rest, commissionPct: round4(commissionFromCost(item.salePrice, item.providerCost)) };
   }
   if (item.marginMode === "commission") {
@@ -560,7 +578,14 @@ function totalsFor(item) {
   if (billingMode === "DEVOLUCION_COBRA_CLIENTE") {
     return { saleNet, providerNet: 0, profitNet: saleNet, ruleMissing: false };
   }
-  const providerNet = saleNet * (1 - Number(priceRule.commissionPct || 0) / 100);
+  // Si la regla tiene costo real guardado, el costo del remito es
+  // cantidad × costo — exacto, sin pasar por ningún % (evita los centavos
+  // de diferencia que aparecían al reconstruir el costo desde una comisión
+  // redondeada, sobre todo con cantidades grandes). Si la regla es
+  // genuinamente %-based (sin costo real conocido), se calcula como antes.
+  const providerNet = priceRule.providerCost !== undefined
+    ? quantity * Number(priceRule.providerCost)
+    : saleNet * (1 - Number(priceRule.commissionPct || 0) / 100);
   return { saleNet, providerNet, profitNet: saleNet - providerNet, ruleMissing: false };
 }
 
@@ -862,7 +887,7 @@ function ruleSortValue(item, key) {
   if (key === "product") return byId(state.products, item.productId)?.name || "";
   if (key === "salePrice") return Number(item.salePrice) || 0;
   if (key === "commissionPct") return Number(item.commissionPct) || 0;
-  if (key === "cost") return item.salePrice * (1 - Number(item.commissionPct || 0) / 100);
+  if (key === "cost") return item.providerCost !== undefined ? Number(item.providerCost) : item.salePrice * (1 - Number(item.commissionPct || 0) / 100);
   if (key === "validFrom") return item.validFrom || "";
   return "";
 }
@@ -916,7 +941,7 @@ function renderRules() {
       <td>${escapeHtml(product)}</td>
       <td class="num">${money(item.salePrice)}</td>
       <td class="num">${Number(item.commissionPct || 0).toFixed(2)}%</td>
-      <td class="num">${money(item.salePrice * (1 - Number(item.commissionPct || 0) / 100))}</td>
+      <td class="num">${money(item.providerCost !== undefined ? Number(item.providerCost) : item.salePrice * (1 - Number(item.commissionPct || 0) / 100))}</td>
       <td>${item.validFrom}</td>
       <td><button type="button" data-delete-rule="${item.id}" title="Eliminar">Borrar</button></td>
     </tr>`;
@@ -2618,13 +2643,22 @@ addFromForm($("#deliveryForm"), "deliveries", (v) => {
 
 addFromForm($("#ruleForm"), "priceRules", (v) => {
   const salePrice = Number(v.salePrice);
-  // Si cargó el costo real del proveedor, la comisión % se calcula desde
-  // ahí con precisión completa (evita que redondee el % a mano y pierda
-  // centavos, ej: $4500 de costo -> 18.1818...% en vez de 18.18%).
-  const commissionPct = v.providerCost
-    ? round4(commissionFromCost(salePrice, Number(v.providerCost)))
+  // "hasCost" = Yamila tipeó el costo real (no el campo espejo autocompletado
+  // por sincronización). Si tipeó el %, aunque el costo también tenga un
+  // valor en pantalla, ese valor es solo un espejo redondeado — no se guarda
+  // como fuente de verdad.
+  const lastEdited = $("#ruleForm").dataset.lastEditedField;
+  const hasCost = lastEdited === "cost" && v.providerCost !== undefined && v.providerCost !== "";
+  const providerCost = hasCost ? round2(Number(v.providerCost)) : undefined;
+  // Si cargó el costo real del proveedor, ESE es el dato que se guarda y el
+  // que se usa después para calcular plata (totalsFor) — nunca se
+  // reconstruye multiplicando por un % redondeado, por chico que sea el
+  // redondeo, porque con cantidades grandes esos centavos se notan. La
+  // comisión % se calcula igual, pero queda solo de referencia/visual.
+  const commissionPct = hasCost
+    ? round4(commissionFromCost(salePrice, providerCost))
     : round4(Number(v.commissionPct || 0));
-  return {
+  const built = {
     id: cryptoId(),
     clientId: v.clientId,
     locationId: v.locationId,
@@ -2634,12 +2668,18 @@ addFromForm($("#ruleForm"), "priceRules", (v) => {
     commissionPct,
     validFrom: v.validFrom
   };
+  if (hasCost) built.providerCost = providerCost;
+  return built;
 });
 
 /**
  * Sincroniza en vivo Costo proveedor <-> Comision % en el form de precios,
  * para que Yamila pueda cargar el que tenga a mano y el otro se calcule
- * solo, con precisión completa (no a mano con calculadora).
+ * solo, con precisión completa (no a mano con calculadora). Guarda además
+ * cuál de los dos campos fue el que ella tipeó realmente (el otro se
+ * autocompleta como espejo) — el submit handler necesita saber esto para
+ * no terminar guardando el valor redondeado del campo espejo como si fuera
+ * el dato real.
  */
 (function setupRuleCostSync() {
   const form = $("#ruleForm");
@@ -2650,6 +2690,7 @@ addFromForm($("#ruleForm"), "priceRules", (v) => {
   if (!saleInput || !costInput || !pctInput) return;
 
   costInput.addEventListener("input", () => {
+    form.dataset.lastEditedField = "cost";
     const sale = Number(saleInput.value);
     const cost = Number(costInput.value);
     if (sale > 0 && costInput.value !== "") {
@@ -2658,6 +2699,7 @@ addFromForm($("#ruleForm"), "priceRules", (v) => {
   });
 
   pctInput.addEventListener("input", () => {
+    form.dataset.lastEditedField = "pct";
     const sale = Number(saleInput.value);
     const pct = Number(pctInput.value);
     if (sale > 0 && pctInput.value !== "") {
@@ -2666,7 +2708,10 @@ addFromForm($("#ruleForm"), "priceRules", (v) => {
   });
 
   form.addEventListener("reset", () => {
-    setTimeout(() => { costInput.value = ""; }, 0);
+    setTimeout(() => {
+      costInput.value = "";
+      delete form.dataset.lastEditedField;
+    }, 0);
   });
 })();
 
