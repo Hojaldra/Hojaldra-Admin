@@ -92,11 +92,13 @@ const seed = {
   // sala/semana, calcula retenciones sobre el total, y cuelgan de acá los
   // cheques que cubren el neto a abonar. Ver checks abajo.
   paymentOrders: [],
-  // checks: cuelgan de una paymentOrder. Indivisibles — o se depositan
-  // (ACREDITADO, plata real en el banco) o se endosan enteros a una o más
-  // facturas de proveedor (ENDOSADO — nunca tocan la cuenta de Hojaldra,
-  // van directo del cliente que las emitió al proveedor). providerInvoiceIds
-  // guarda a qué factura(s) de proveedor quedó aplicado un cheque endosado.
+  // checks: cuelgan de una paymentOrder. O se depositan (ACREDITADO, plata
+  // real en el banco) o se endosan a una o más facturas de proveedor —
+  // ENDOSADO si se usó todo el monto, ENDOSADO_PARCIAL si todavía le queda
+  // saldo sin asignar (nunca tocan la cuenta de Hojaldra, van directo del
+  // cliente que las emitió al proveedor). check.allocations guarda cuánto
+  // de ese cheque quedó aplicado a cada factura de proveedor puntual —
+  // ver checkRemaining/checkAllocatedTotal y providerInvoiceCoverage.
   checks: [],
   // directPayments: pagos en efectivo/transferencia registrados a mano para
   // cerrar una factura de proveedor — ya sea el pago completo (proveedor
@@ -1572,7 +1574,7 @@ function renderOpCard(op) {
         <td>${c.metodo === "TRANSFERENCIA" ? "-" : escapeHtml(c.banco || "-")}</td>
         <td>${c.fechaPago ? fmtDDMMYY(c.fechaPago) : "-"}</td>
         <td class="num">${money(c.monto)}</td>
-        <td><span class="status ${c.status}">${c.status}</span>${c.status === "ENDOSADO" ? (checksEndorsedInvoiceLabel(c)) : ""}</td>
+        <td><span class="status ${c.status}">${c.status === "ENDOSADO_PARCIAL" ? "ENDOSADO (parcial)" : c.status}</span>${c.status === "ENDOSADO" || c.status === "ENDOSADO_PARCIAL" ? (checksEndorsedInvoiceLabel(c)) : ""}</td>
         <td>
           ${c.status === "RECIBIDO" ? `<button type="button" class="small" data-check-acreditado="${c.id}">Marcar acreditado</button> <button type="button" class="small" data-check-rechazado="${c.id}">Marcar rechazado</button>` : ""}
           <button type="button" class="small remove-btn" data-delete-check="${c.id}" title="Borrar este cheque">Borrar</button>
@@ -1649,29 +1651,34 @@ function renderEndosoSection() {
   const invoiceId = invoiceSelect.value;
   const invoice = byId(state.invoices, invoiceId);
 
-  const availableChecks = state.checks.filter((c) => c.status === "RECIBIDO");
+  // Un cheque sigue disponible para endosar mientras le quede saldo sin
+  // asignar — no solo los RECIBIDO "vírgenes": uno ENDOSADO_PARCIAL (que ya
+  // cubrió otra factura y le sobró plata) también puede seguir aplicándose.
+  const availableChecks = state.checks.filter((c) => (c.status === "RECIBIDO" || c.status === "ENDOSADO_PARCIAL") && checkRemaining(c) > 0);
   $("#endosoCheckPicker").innerHTML = availableChecks.length
     ? `<table class="picker-table">
-        <thead><tr><th></th><th>Cliente / OP</th><th>N° cheque</th><th>Banco</th><th>Fecha pago</th><th class="num">Monto</th></tr></thead>
+        <thead><tr><th></th><th>Cliente / OP</th><th>N° cheque</th><th>Banco</th><th>Fecha pago</th><th class="num">Disponible</th></tr></thead>
         <tbody>${availableChecks.map((c) => {
           const op = byId(state.paymentOrders, c.paymentOrderId);
           const client = op ? byId(state.clients, op.clientId)?.name || "" : "";
           const checked = endosoSelectedCheckIds.includes(c.id);
+          const remaining = checkRemaining(c);
+          const partialNote = c.status === "ENDOSADO_PARCIAL" ? `<span class="cell-sub"> (de ${money(c.monto)}, ya endosó parte)</span>` : "";
           return `<tr>
             <td><input type="checkbox" data-endoso-check="${c.id}" ${checked ? "checked" : ""} /></td>
             <td>${escapeHtml(client)}${op ? ` <span class="cell-sub">OP ${escapeHtml(op.number || op.id)}</span>` : ""}</td>
             <td>${escapeHtml(c.numero || "-")}</td>
             <td>${escapeHtml(c.banco || "-")}</td>
             <td>${c.fechaPago ? fmtDDMMYY(c.fechaPago) : "-"}</td>
-            <td class="num">${money(c.monto)}</td>
+            <td class="num">${money(remaining)}${partialNote}</td>
           </tr>`;
         }).join("")}</tbody>
       </table>`
-    : `<p class="picker-empty">No hay cheques RECIBIDO disponibles para endosar por ahora.</p>`;
+    : `<p class="picker-empty">No hay cheques disponibles para endosar por ahora.</p>`;
 
   const selectedTotal = round2(availableChecks
     .filter((c) => endosoSelectedCheckIds.includes(c.id))
-    .reduce((sum, c) => sum + Number(c.monto || 0), 0));
+    .reduce((sum, c) => sum + checkRemaining(c), 0));
 
   if (!invoice) {
     $("#endosoSummary").innerHTML = "";
@@ -1679,20 +1686,23 @@ function renderEndosoSection() {
     return;
   }
 
-  const diff = round2(selectedTotal - Number(invoice.amountGross));
+  const yaCubierto = providerInvoiceCoverage(invoice.id).total;
+  const faltaAntes = round2(Number(invoice.amountGross) - yaCubierto);
+  const diff = round2(selectedTotal - faltaAntes);
   const diffHtml = Math.abs(diff) < 1
     ? `<span class="ok">Cierra exacto ✓</span>`
     : diff > 0
-      ? `<span class="ok">Margen de este endoso: ${money(diff)}</span>`
+      ? `<span class="ok">Con esto sobra ${money(diff)} — queda como saldo disponible en el/los cheque(s) para el próximo pago</span>`
       : `<span class="warn">Todavía falta cubrir ${money(-diff)} — completá abajo con un pago directo, o tildá otro cheque</span>`;
 
   $("#endosoSummary").innerHTML = `<div style="display:flex;gap:18px;flex-wrap:wrap;">
     <span>Factura a cubrir: <strong>${money(invoice.amountGross)}</strong></span>
-    <span>Cheques tildados: <strong>${money(selectedTotal)}</strong></span>
+    ${yaCubierto > 0 ? `<span>Ya cubierto antes: <strong>${money(yaCubierto)}</strong></span>` : ""}
+    <span>Cheques tildados (disponible): <strong>${money(selectedTotal)}</strong></span>
     ${diffHtml}
   </div>`;
 
-  const falta = Math.max(0, round2(Number(invoice.amountGross) - selectedTotal));
+  const falta = Math.max(0, round2(faltaAntes - selectedTotal));
   $("#endosoDirectPayment").innerHTML = falta > 0
     ? `<p class="legend">Pago complementario (efectivo/transferencia) para cubrir lo que falta — opcional, también se puede cargar después desde Facturas:</p>
        <div class="cheque-draft-row" style="grid-template-columns: 1fr 1fr 1fr;">
@@ -1730,6 +1740,7 @@ $("#endosoForm").addEventListener("submit", (event) => {
     alert("Tildá al menos un cheque para endosar.");
     return;
   }
+  const invoice = byId(state.invoices, invoiceId);
   const montoDirectoInput = $("#endosoDirectMonto");
   const montoDirecto = Number(montoDirectoInput?.value || 0);
   const fechaDirecto = $("#endosoDirectFecha")?.value || "";
@@ -1737,11 +1748,22 @@ $("#endosoForm").addEventListener("submit", (event) => {
     alert("Completá la fecha del pago complementario (o poné el monto en 0 si no hace falta).");
     return;
   }
+  // Reparte lo que hace falta cubrir entre los cheques tildados, en el orden
+  // en que están tildados, tomando de cada uno solo lo que se necesita — si
+  // un cheque tiene más saldo del que hace falta, el resto le queda
+  // disponible (no se le asigna a esta factura) para el próximo endoso.
+  let faltaCubrir = Math.max(0, round2(Number(invoice.amountGross) - providerInvoiceCoverage(invoiceId).total));
   endosoSelectedCheckIds.forEach((id) => {
     const check = byId(state.checks, id);
-    if (!check) return;
-    check.status = "ENDOSADO";
-    check.providerInvoiceIds = [...new Set([...(check.providerInvoiceIds || []), invoiceId])];
+    if (!check || faltaCubrir <= 0) return;
+    const disponible = checkRemaining(check);
+    if (disponible <= 0) return;
+    const aplicar = round2(Math.min(disponible, faltaCubrir));
+    if (aplicar <= 0) return;
+    check.allocations = check.allocations || [];
+    check.allocations.push({ invoiceId, amount: aplicar });
+    check.status = checkRemaining(check) > 0 ? "ENDOSADO_PARCIAL" : "ENDOSADO";
+    faltaCubrir = round2(faltaCubrir - aplicar);
   });
   if (montoDirecto > 0) {
     state.directPayments = state.directPayments || [];
@@ -1794,8 +1816,8 @@ document.body.addEventListener("click", (event) => {
   const deleteCheckId = event.target.dataset?.deleteCheck;
   if (deleteCheckId) {
     const check = byId(state.checks, deleteCheckId);
-    const warning = check?.status === "ENDOSADO"
-      ? "Este cheque está ENDOSADO a una factura de proveedor — si lo borrás, esa factura va a quedar sin esa parte de cobertura (podés volver a endosar otro cheque después). ¿Confirmás?"
+    const warning = check?.status === "ENDOSADO" || check?.status === "ENDOSADO_PARCIAL"
+      ? "Este cheque está endosado (total o parcialmente) a una o más facturas de proveedor — si lo borrás, esas facturas van a quedar sin esa parte de cobertura (podés volver a endosar otro cheque después). ¿Confirmás?"
       : "¿Borrar este cheque? Podés volver a cargarlo con el formulario de abajo.";
     if (!confirm(warning)) return;
     state.checks = state.checks.filter((c) => c.id !== deleteCheckId);
@@ -2134,11 +2156,24 @@ function opChecksTotal(op) {
 
 /**
  * Un cheque "resuelto" es uno que ya no puede volver a moverse: se depositó
- * (ACREDITADO) o se endosó a un proveedor (ENDOSADO). RECIBIDO y RECHAZADO
- * no cuentan como resueltos.
+ * (ACREDITADO) o ya se terminó de endosar del todo (ENDOSADO). Un cheque
+ * ENDOSADO_PARCIAL ya se usó para cubrir algo, pero todavía tiene saldo sin
+ * asignar — cuenta como "resuelto" para el lado del cliente (ya se decidió
+ * su destino), pero sigue disponible en el picker de endosos por el saldo
+ * que le queda. RECIBIDO y RECHAZADO no cuentan como resueltos.
  */
 function checkIsResolved(check) {
-  return check.status === "ACREDITADO" || check.status === "ENDOSADO";
+  return check.status === "ACREDITADO" || check.status === "ENDOSADO" || check.status === "ENDOSADO_PARCIAL";
+}
+
+/** Cuánto de un cheque ya se asignó a facturas de proveedor (endosos, parciales o completos). */
+function checkAllocatedTotal(check) {
+  return round2((check.allocations || []).reduce((sum, a) => sum + Number(a.amount || 0), 0));
+}
+
+/** Saldo de un cheque todavía sin asignar a ninguna factura — lo que queda disponible para el próximo endoso. */
+function checkRemaining(check) {
+  return round2(Number(check.monto || 0) - checkAllocatedTotal(check));
 }
 
 function opIsFullyResolved(op) {
@@ -2153,20 +2188,28 @@ function clientInvoiceOP(invoiceId) {
   return state.paymentOrders.find((op) => (op.invoiceIds || []).includes(invoiceId));
 }
 
-/** Cheques endosados (status ENDOSADO) que quedaron aplicados a esta factura de proveedor. */
+/** Cheques (o la porción de un cheque) que quedaron aplicados a esta factura de proveedor, vía allocations. */
 function checksEndorsedToInvoice(invoiceId) {
-  return state.checks.filter((c) => c.status === "ENDOSADO" && (c.providerInvoiceIds || []).includes(invoiceId));
+  return state.checks.filter((c) => (c.allocations || []).some((a) => a.invoiceId === invoiceId));
 }
 
-/** Etiqueta chica "→ Nº factura (Proveedor)" para mostrar al lado de un cheque ENDOSADO, con trazabilidad de a quién fue a parar. */
+/** Cuánto de un cheque en particular se aplicó a una factura puntual. */
+function checkAllocationFor(check, invoiceId) {
+  return round2((check.allocations || []).filter((a) => a.invoiceId === invoiceId).reduce((sum, a) => sum + Number(a.amount || 0), 0));
+}
+
+/** Etiqueta chica "→ Nº factura (Proveedor) $monto" para mostrar al lado de un cheque endosado (total o parcial), con trazabilidad de a quién fue a parar cada parte. */
 function checksEndorsedInvoiceLabel(check) {
-  const labels = (check.providerInvoiceIds || []).map((invoiceId) => {
+  const invoiceIds = [...new Set((check.allocations || []).map((a) => a.invoiceId))];
+  const labels = invoiceIds.map((invoiceId) => {
     const inv = byId(state.invoices, invoiceId);
     if (!inv) return null;
     const provider = byId(state.providers, inv.providerId)?.name || "";
-    return `${escapeHtml(inv.number)} (${escapeHtml(provider)})`;
+    return `${escapeHtml(inv.number)} (${escapeHtml(provider)}) ${money(checkAllocationFor(check, invoiceId))}`;
   }).filter(Boolean);
-  return labels.length ? `<br><span class="cell-sub">→ ${labels.join(", ")}</span>` : "";
+  const remaining = checkRemaining(check);
+  const remainingLabel = remaining > 0 ? ` · saldo disponible ${money(remaining)}` : "";
+  return labels.length ? `<br><span class="cell-sub">→ ${labels.join(", ")}${remainingLabel}</span>` : "";
 }
 
 function directPaymentsForInvoice(invoiceId) {
@@ -2181,7 +2224,10 @@ function directPaymentsForInvoice(invoiceId) {
  * no hace falta que cierre exacto, endosar de más es margen, no error.
  */
 function providerInvoiceCoverage(invoiceId) {
-  const endorsed = round2(checksEndorsedToInvoice(invoiceId).reduce((sum, c) => sum + Number(c.monto || 0), 0));
+  // Suma la porción asignada de cada cheque a ESTA factura puntual — no el
+  // monto completo del cheque, porque un mismo cheque puede estar repartido
+  // entre varias facturas (endoso parcial + saldo a favor para la próxima).
+  const endorsed = round2(state.checks.reduce((sum, c) => sum + checkAllocationFor(c, invoiceId), 0));
   const direct = round2(directPaymentsForInvoice(invoiceId).reduce((sum, p) => sum + Number(p.monto || 0), 0));
   return { endorsed, direct, total: round2(endorsed + direct) };
 }
@@ -2981,14 +3027,18 @@ document.body.addEventListener("click", (event) => {
     render();
   }
   if (invoiceId) {
-    // Si es una factura de proveedor con cheques endosados, esos cheques
-    // vuelven a RECIBIDO (no se pierden, quedan libres para endosar a otra
-    // factura) y se borran los pagos directos que la cubrían — para no
-    // dejar referencias colgando a una factura que ya no existe.
+    // Si es una factura de proveedor con cheques endosados (total o
+    // parcialmente), se le saca a cada cheque solo la porción que tenía
+    // asignada a ESTA factura — el resto de sus asignaciones a otras
+    // facturas queda intacto. El cheque recalcula su estado según cuánto
+    // saldo le quede sin asignar.
     state.checks.forEach((c) => {
-      if ((c.providerInvoiceIds || []).includes(invoiceId)) {
-        c.providerInvoiceIds = c.providerInvoiceIds.filter((id) => id !== invoiceId);
-        if (!c.providerInvoiceIds.length && c.status === "ENDOSADO") c.status = "RECIBIDO";
+      if (!(c.allocations || []).some((a) => a.invoiceId === invoiceId)) return;
+      c.allocations = c.allocations.filter((a) => a.invoiceId !== invoiceId);
+      if (!c.allocations.length) {
+        c.status = "RECIBIDO";
+      } else {
+        c.status = checkRemaining(c) > 0 ? "ENDOSADO_PARCIAL" : "ENDOSADO";
       }
     });
     state.directPayments = (state.directPayments || []).filter((p) => p.invoiceId !== invoiceId);

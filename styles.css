@@ -358,6 +358,12 @@ th.num {
   color: #46358a;
 }
 
+.status.ENDOSADO_PARCIAL {
+  background: #e7e3f7;
+  color: #46358a;
+  border: 1px dashed #46358a;
+}
+
 .status.SIN_COBRO {
   background: var(--surface-2);
   color: var(--muted);
