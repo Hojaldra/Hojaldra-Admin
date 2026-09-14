@@ -279,6 +279,7 @@ function hydrate(saved) {
     directPayments: saved.directPayments || []
   };
   merged.priceRules = (merged.priceRules || []).map(migrateRuleToCommission);
+  merged.checks = (merged.checks || []).map(migrateCheckAllocations);
   return merged;
 }
 
@@ -289,6 +290,33 @@ function safeParse(raw) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Migración de datos viejos: si en localStorage/Sheets todavía hay cheques
+ * endosados con el modelo viejo (providerInvoiceIds, sin monto por
+ * factura), les arma el/los allocations equivalentes para que
+ * providerInvoiceCoverage() los siga contando. Con el modelo viejo un
+ * cheque solo podía terminar ENDOSADO a una factura por vez (el picker lo
+ * sacaba de la lista apenas se usaba una vez), así que el caso normal es
+ * una sola factura con el monto completo. Si por algún motivo quedó
+ * linkeado a más de una (no debería poder pasar por la UI vieja, pero por
+ * las dudas), se reparte el monto completo entre todas en partes iguales
+ * en vez de contarlo entero para cada una — eso sí hubiera duplicado plata.
+ */
+function migrateCheckAllocations(check) {
+  if (!check.allocations && check.providerInvoiceIds && check.providerInvoiceIds.length) {
+    const n = check.providerInvoiceIds.length;
+    const monto = Number(check.monto || 0);
+    check.allocations = check.providerInvoiceIds.map((invoiceId, i) => ({
+      invoiceId,
+      // La última cuota se ajusta por redondeo para que la suma cierre justo.
+      amount: i < n - 1 ? round2(monto / n) : round2(monto - round2(monto / n) * (n - 1))
+    }));
+  }
+  if (!check.allocations) check.allocations = [];
+  delete check.providerInvoiceIds;
+  return check;
 }
 
 /**
