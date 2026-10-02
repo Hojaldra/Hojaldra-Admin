@@ -1368,8 +1368,9 @@ function draftOpBreakdown() {
   const totalGross = round2(invoiceIds.reduce((sum, id) => sum + Number(byId(state.invoices, id)?.amountGross || 0), 0));
   const retIva = round2(Number($("#opRetIva")?.value || 0));
   const retGanancias = round2(Number($("#opRetGanancias")?.value || 0));
-  const netoAAbonar = round2(totalGross - retIva - retGanancias);
-  return { totalGross, retIva, retGanancias, netoAAbonar };
+  const retIIBB = round2(Number($("#opRetIIBB")?.value || 0));
+  const netoAAbonar = round2(totalGross - retIva - retGanancias - retIIBB);
+  return { totalGross, retIva, retGanancias, retIIBB, netoAAbonar };
 }
 
 function renderOpBreakdown() {
@@ -1380,7 +1381,8 @@ function renderOpBreakdown() {
         <tr><td>1. Total facturas tildadas (c/IVA)</td><td class="num">${money(b.totalGross)}</td></tr>
         <tr><td>2. Retención IVA</td><td class="num">−${money(b.retIva)}</td></tr>
         <tr><td>3. Retención Ganancias</td><td class="num">−${money(b.retGanancias)}</td></tr>
-        <tr class="total"><td>4. Neto a abonar</td><td class="num">${money(b.netoAAbonar)}</td></tr>
+        <tr><td>4. Retención IIBB</td><td class="num">−${money(b.retIIBB)}</td></tr>
+        <tr class="total"><td>5. Neto a abonar</td><td class="num">${money(b.netoAAbonar)}</td></tr>
       </tbody>
     </table>
   </div>`;
@@ -1446,7 +1448,7 @@ $("#opMetodo").addEventListener("change", () => {
   renderOpChequeRows();
   renderOpChequeSummary();
 });
-["#opRetIva", "#opRetGanancias"].forEach((sel) => $(sel).addEventListener("input", renderOpBreakdown));
+["#opRetIva", "#opRetGanancias", "#opRetIIBB"].forEach((sel) => $(sel).addEventListener("input", renderOpBreakdown));
 
 $("#opAddChequeBtn").addEventListener("click", () => {
   // Se propone como monto lo que todavía falta cubrir del neto a abonar
@@ -1504,7 +1506,8 @@ $("#opForm").addEventListener("submit", (event) => {
     // los usa siempre que estén presentes (siempre, desde que se sacó el
     // cálculo automático a partir de un %), en vez de recalcular con un %.
     manualRetIva: draftOpBreakdown().retIva,
-    manualRetGanancias: draftOpBreakdown().retGanancias
+    manualRetGanancias: draftOpBreakdown().retGanancias,
+    manualRetIIBB: draftOpBreakdown().retIIBB
   };
   state.paymentOrders.push(op);
   opDraftChecks.forEach((c) => {
@@ -1637,6 +1640,7 @@ function renderOpCard(op) {
             <tr><td>Total facturas c/IVA</td><td class="num">${money(b.totalGross)}</td></tr>
             <tr><td>Ret. IVA</td><td class="num">−${money(b.retIva)}</td></tr>
             <tr><td>Ret. Ganancias</td><td class="num">−${money(b.retGanancias)}</td></tr>
+            <tr><td>Ret. IIBB</td><td class="num">−${money(b.retIIBB)}</td></tr>
             <tr class="total"><td>Neto a abonar</td><td class="num">${money(b.netoAAbonar)}</td></tr>
           </tbody>
         </table>
@@ -2170,8 +2174,10 @@ function opBreakdown(op) {
     retIva = ivaComponent; // se retiene el 100% del IVA de la factura, siempre
     retGanancias = round2(netoSIva * (Number(op.gananciasRatePct ?? 6) / 100));
   }
-  const netoAAbonar = round2(totalGross - retIva - retGanancias);
-  return { totalGross, netoSIva, ivaComponent, retIva, retGanancias, netoAAbonar, ivaInvoiceRatePct };
+  // IIBB siempre es un monto cargado a mano (OPs anteriores no lo tienen = 0).
+  const retIIBB = round2(Number(op.manualRetIIBB || 0));
+  const netoAAbonar = round2(totalGross - retIva - retGanancias - retIIBB);
+  return { totalGross, netoSIva, ivaComponent, retIva, retGanancias, retIIBB, netoAAbonar, ivaInvoiceRatePct };
 }
 
 function opChecks(op) {
