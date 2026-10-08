@@ -181,6 +181,12 @@
             <h2>Proveedores</h2>
             <label>Nombre<input name="name" required /></label>
             <label>CUIT<input name="taxId" /></label>
+            <label>IVA de sus facturas
+              <select name="ivaRatePct">
+                <option value="21">21%</option>
+                <option value="10.5">10,5%</option>
+              </select>
+            </label>
             <button type="submit">Agregar proveedor</button>
             <button type="button" class="cancel-edit-btn is-hidden">Cancelar edición</button>
             <ul id="providerList"></ul>

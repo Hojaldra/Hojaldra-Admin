@@ -594,6 +594,19 @@ function latestRule(item) {
  *    todo en $0. El remito queda igual en la tabla, para que no desaparezca
  *    del historial, pero no mueve un peso.
  */
+/**
+ * Alícuota de IVA con la que un proveedor le factura a Hojaldra (0.21 o
+ * 0.105). Se lee de la ficha del proveedor (ivaRatePct); si no la tiene
+ * cargada, o el remito no tiene proveedor, se asume 21% como siempre. Del
+ * lado de VENTAS no se usa: a los clientes se les factura siempre con
+ * IVA_RATE (21%).
+ */
+function providerIvaRate(providerId) {
+  const provider = byId(state.providers, providerId);
+  const pct = provider && provider.ivaRatePct != null ? Number(provider.ivaRatePct) : IVA_RATE * 100;
+  return (Number.isFinite(pct) ? pct : IVA_RATE * 100) / 100;
+}
+
 function totalsFor(item) {
   const priceRule = latestRule(item);
   const quantity = Number(item.quantity) || 0;
@@ -868,16 +881,21 @@ function renderDeliveries() {
 
   const totals = rows.reduce((acc, item) => {
     const t = totalsFor(item);
+    const provRate = providerIvaRate(item.providerId);
     acc.saleNet += t.saleNet;
     acc.providerNet += t.providerNet;
     acc.profitNet += t.profitNet;
+    // c/IVA a pagar al proveedor, con la tasa de CADA proveedor
+    acc.providerGross += t.providerNet * (1 + provRate);
+    // IVA a ingresar = débito por ventas (21%) − crédito por compras (tasa del proveedor)
+    acc.ivaDebt += t.saleNet * IVA_RATE - t.providerNet * provRate;
     return acc;
-  }, { saleNet: 0, providerNet: 0, profitNet: 0 });
+  }, { saleNet: 0, providerNet: 0, profitNet: 0, providerGross: 0, ivaDebt: 0 });
 
   $("#kpiRevenue").textContent = money(totals.saleNet * (1 + IVA_RATE));
-  $("#kpiPayable").textContent = money(totals.providerNet * (1 + IVA_RATE));
+  $("#kpiPayable").textContent = money(totals.providerGross);
   $("#kpiProfit").textContent = money(totals.profitNet);
-  $("#kpiIva").textContent = money(totals.profitNet * IVA_RATE - retIvaForDeliveries(rows));
+  $("#kpiIva").textContent = money(totals.ivaDebt - retIvaForDeliveries(rows));
 }
 
 /**
@@ -1009,7 +1027,7 @@ document.querySelectorAll("#rules th.sortable").forEach((th) => {
 
 function renderCatalogs() {
   $("#providerList").innerHTML = state.providers.map((item) =>
-    `<li><span>${escapeHtml(item.name)}</span><span><button type="button" class="edit-btn" data-edit-provider="${item.id}">Editar</button> <button type="button" class="edit-btn danger" data-delete-provider="${item.id}">Borrar</button></span></li>`
+    `<li><span>${escapeHtml(item.name)}${item.ivaRatePct != null && Number(item.ivaRatePct) !== 21 ? ` - IVA ${String(item.ivaRatePct).replace(".", ",")}%` : ""}</span><span><button type="button" class="edit-btn" data-edit-provider="${item.id}">Editar</button> <button type="button" class="edit-btn danger" data-delete-provider="${item.id}">Borrar</button></span></li>`
   ).join("");
   $("#clientList").innerHTML = state.clients.map((item) =>
     `<li><span>${escapeHtml(item.name)} - ${cycleLabel(item.billingCycle)}${item.billingCycle === "weekly" ? ` (arranca ${dayLabel(item.weekStartDay)})` : ""}</span><span><button type="button" class="edit-btn" data-edit-client="${item.id}">Editar</button> <button type="button" class="edit-btn danger" data-delete-client="${item.id}">Borrar</button></span></li>`
@@ -1960,7 +1978,11 @@ function renderMonthlyTable() {
       .reduce((sum, d) => sum + totalsFor(d).profitNet, 0);
     const ivaDevengado = state.deliveries
       .filter((d) => monthKey(d.date) === month)
-      .reduce((sum, d) => sum + totalsFor(d).profitNet * IVA_RATE, 0);
+      .reduce((sum, d) => {
+        const t = totalsFor(d);
+        // débito por ventas al 21% − crédito por compras a la tasa del proveedor
+        return sum + t.saleNet * IVA_RATE - t.providerNet * providerIvaRate(d.providerId);
+      }, 0);
     const expensesMonth = state.expenses
       .filter((e) => monthKey(e.date) === month)
       .reduce((sum, e) => sum + Number(e.amount), 0);
@@ -2045,7 +2067,7 @@ function renderProviderPayables(rows) {
     const period = periodLabelFor(item);
     const key = `${item.providerId}|${period}`;
     const current = map.get(key) || { provider, period, total: 0, pending: 0, receiptNos: [] };
-    const gross = totalsFor(item).providerNet * (1 + IVA_RATE);
+    const gross = totalsFor(item).providerNet * (1 + providerIvaRate(item.providerId));
     current.total += gross;
     if (deliveryStatus(item.id) !== "PAGO") current.pending += gross;
     if (item.receiptNo && !current.receiptNos.includes(item.receiptNo)) current.receiptNos.push(item.receiptNo);
@@ -2602,12 +2624,13 @@ function renderInvoicePickers() {
       return filterByWeek(candidates, data.weekFilter);
     },
     valueFn: (t) => t.providerNet,
+    rateFn: (item) => providerIvaRate(item.providerId),
     showLocation: true,
     emptyMessage: "No hay remitos listos para este proveedor todavía — recordá que primero tiene que estar cobrada la factura del cliente."
   });
 }
 
-function renderPicker({ containerSelector, totalSelector, form, getCandidates, valueFn, emptyMessage, onSelectionChange, showLocation }) {
+function renderPicker({ containerSelector, totalSelector, form, getCandidates, valueFn, emptyMessage, onSelectionChange, showLocation, rateFn = () => IVA_RATE }) {
   const container = $(containerSelector);
   const data = formValues(form);
   const candidates = getCandidates(data);
@@ -2633,7 +2656,7 @@ function renderPicker({ containerSelector, totalSelector, form, getCandidates, v
           <td>${escapeHtml(item.receiptNo)}</td>
           <td>${escapeHtml(product)}</td>
           <td class="num">${Number(item.quantity).toLocaleString("es-AR")}</td>
-          <td class="num">${money(valueFn(t) * (1 + IVA_RATE))}</td>
+          <td class="num">${money(valueFn(t) * (1 + rateFn(item)))}</td>
         </tr>`;
       }).join("")}
     </tbody>
@@ -2642,7 +2665,7 @@ function renderPicker({ containerSelector, totalSelector, form, getCandidates, v
   const recompute = () => {
     const checked = [...container.querySelectorAll(".picker-check:checked")].map((el) => el.dataset.pickerId);
     const selected = candidates.filter((item) => checked.includes(item.id));
-    const total = selected.reduce((sum, item) => sum + valueFn(totalsFor(item)) * (1 + IVA_RATE), 0);
+    const total = selected.reduce((sum, item) => sum + valueFn(totalsFor(item)) * (1 + rateFn(item)), 0);
     $(totalSelector).textContent = money(total);
     form.dataset.selectedIds = JSON.stringify(checked);
     form.dataset.computedTotal = total.toFixed(2);
@@ -2841,7 +2864,8 @@ function exitEditMode(form, submitLabelDefault) {
 addOrEditFromForm($("#providerForm"), "providers", (v, editingId) => ({
   id: editingId || slug(v.name),
   name: v.name,
-  taxId: v.taxId
+  taxId: v.taxId,
+  ivaRatePct: Number(v.ivaRatePct) || 21
 }), "Agregar proveedor");
 
 addOrEditFromForm($("#clientForm"), "clients", (v, editingId) => ({
@@ -2897,6 +2921,7 @@ document.body.addEventListener("click", (event) => {
     const form = $("#providerForm");
     form.elements.name.value = item.name;
     form.elements.taxId.value = item.taxId || "";
+    form.elements.ivaRatePct.value = String(item.ivaRatePct ?? 21);
     enterEditMode(form, "Guardar cambios", providerId);
   }
   if (clientId) {
@@ -2982,6 +3007,9 @@ addFromForm($("#providerInvoiceForm"), "invoices", (v) => {
     issueDate: v.issueDate,
     paymentDate: "",
     amountGross: computedTotal,
+    // Alícuota con la que se calculó amountGross, congelada: si después
+    // cambia la ficha del proveedor, esta factura no se mueve.
+    ivaRatePct: round2(providerIvaRate(v.providerId) * 100),
     status: "PENDIENTE"
   };
 });
