@@ -800,6 +800,7 @@ function render() {
   renderInvoices();
   renderInvoicePickers();
   renderBalancePanel();
+  renderProviderControlPanel();
   renderExpenses();
   renderMonthlyTable();
   renderPagosTab();
@@ -1319,6 +1320,120 @@ function renderBalancePanel() {
     <tr><th>TOTAL</th><th class="num">${totalQty.toLocaleString("es-AR")}</th><th class="num">${money(totalSale)}</th><th class="num">${money(totalSale * (1 + IVA_RATE))}</th><th></th><th></th></tr>`;
 }
 
+/**
+ * Panel "Control de entregas por proveedor": elegís Proveedor + Cliente
+ * (+ Sala opcional) + Semana/OC y ves cuánto entregó ese proveedor por
+ * producto, para cotejarlo con el proveedor ANTES de que te facture. Es de
+ * solo lectura y NO muestra precios de venta (no es lo que se le manda al
+ * cliente). Excluye los mismos remitos que candidateDeliveries excluye para
+ * facturar a proveedor: devoluciones sin cobro y las que cobra el cliente.
+ * Incluye remitos ya facturados por el proveedor (muestra el N° de factura).
+ */
+function renderProviderControlPanel() {
+  const providerSelect = $("#pcProviderId");
+  const clientSelect = $("#pcClientId");
+  const locationSelect = $("#pcLocationId");
+  const periodSelect = $("#pcPeriod");
+
+  const prevProvider = providerSelect.value;
+  providerSelect.innerHTML = `<option value="">Elegí...</option>` + sortByName(state.providers).map(optionHtml).join("");
+  if (state.providers.some((p) => p.id === prevProvider)) providerSelect.value = prevProvider;
+  const providerId = providerSelect.value;
+
+  const prevClient = clientSelect.value;
+  clientSelect.innerHTML = `<option value="">Elegí...</option>` + sortByName(state.clients).map(optionHtml).join("");
+  if (state.clients.some((c) => c.id === prevClient)) clientSelect.value = prevClient;
+  const clientId = clientSelect.value;
+
+  const prevLocation = locationSelect.value;
+  const locations = sortByName(state.locations.filter((loc) => !clientId || loc.clientId === clientId));
+  locationSelect.innerHTML = `<option value="">Todas las salas</option>` + locations.map(optionHtml).join("");
+  if (locations.some((l) => l.id === prevLocation)) locationSelect.value = prevLocation;
+  const locationId = locationSelect.value;
+
+  const countsForProvider = (d) => {
+    const mode = d.billingMode || "NORMAL";
+    return mode !== "DEVOLUCION_SIN_COBRO" && mode !== "DEVOLUCION_COBRA_CLIENTE";
+  };
+
+  const prevPeriod = periodSelect.value;
+  let periods = [];
+  if (providerId && clientId) {
+    const seen = new Map();
+    state.deliveries
+      .filter((d) => d.providerId === providerId && d.clientId === clientId && (!locationId || d.locationId === locationId) && countsForProvider(d))
+      .forEach((d) => {
+        const key = periodKeyFor(d);
+        if (!seen.has(key)) seen.set(key, periodLabelFor(d));
+      });
+    periods = [...seen.entries()].sort((a, b) => b[0].localeCompare(a[0], undefined, { numeric: true }));
+  }
+  periodSelect.innerHTML = `<option value="">Elegí...</option>` + periods.map(([key, label]) => `<option value="${escapeHtml(key)}">${escapeHtml(label)}</option>`).join("");
+  if (periods.some(([key]) => key === prevPeriod)) periodSelect.value = prevPeriod;
+  const period = periodSelect.value;
+
+  const rowsEl = $("#providerControlRows");
+  if (!providerId || !clientId || !period) {
+    rowsEl.innerHTML = `<tr><td class="empty">Elegí proveedor, cliente y semana para ver lo que entregó.</td></tr>`;
+    return;
+  }
+
+  const group = state.deliveries.filter((d) =>
+    d.providerId === providerId && d.clientId === clientId
+    && (!locationId || d.locationId === locationId)
+    && periodKeyFor(d) === period
+    && countsForProvider(d)
+  );
+
+  const salaIds = [...new Set(group.map((d) => d.locationId))]
+    .sort((a, b) => (byId(state.locations, a)?.name || "").localeCompare(byId(state.locations, b)?.name || ""));
+  const showSalas = !locationId && salaIds.length > 1;
+
+  const byProduct = new Map();
+  group.forEach((d) => {
+    const current = byProduct.get(d.productId) || { qty: 0, bySala: new Map(), remitos: new Set(), ids: [] };
+    const qty = Number(d.quantity || 0);
+    current.qty += qty;
+    current.bySala.set(d.locationId, (current.bySala.get(d.locationId) || 0) + qty);
+    if (d.receiptNo) current.remitos.add(d.receiptNo);
+    current.ids.push(d.id);
+    byProduct.set(d.productId, current);
+  });
+
+  const providerInvoices = state.invoices.filter((inv) =>
+    inv.type === "provider" && (inv.deliveryIds || []).some((id) => group.some((d) => d.id === id))
+  );
+
+  const rows = [...byProduct.entries()].map(([productId, data]) => {
+    const productName = byId(state.products, productId)?.name || "";
+    const invoiceNumbers = providerInvoices
+      .filter((inv) => data.ids.some((id) => (inv.deliveryIds || []).includes(id)))
+      .map((inv) => inv.number);
+    return { productName, invoiceNumbers, ...data };
+  }).sort((a, b) => a.productName.localeCompare(b.productName));
+
+  const fmtQty = (n) => Number(n).toLocaleString("es-AR");
+  const totalQty = rows.reduce((s, r) => s + r.qty, 0);
+  const salaTotals = salaIds.map((id) => rows.reduce((s, r) => s + (r.bySala.get(id) || 0), 0));
+  const salaHeaders = showSalas ? salaIds.map((id) => `<th class="num">${escapeHtml(byId(state.locations, id)?.name || "")}</th>`).join("") : "";
+
+  rowsEl.innerHTML = `<tr>
+      <th>Producto</th>${salaHeaders}<th class="num">Cantidad total</th><th>N° Remitos</th><th>N° Factura proveedor</th>
+    </tr>
+    ${rows.map((r) => `<tr>
+      <td>${escapeHtml(r.productName)}</td>
+      ${showSalas ? salaIds.map((id) => `<td class="num">${r.bySala.get(id) ? fmtQty(r.bySala.get(id)) : "-"}</td>`).join("") : ""}
+      <td class="num">${fmtQty(r.qty)}</td>
+      <td>${escapeHtml([...r.remitos].join(", "))}</td>
+      <td>${r.invoiceNumbers.length ? escapeHtml(r.invoiceNumbers.join(", ")) : `<span class="cell-sub">sin facturar</span>`}</td>
+    </tr>`).join("")}
+    <tr><th>TOTAL</th>${showSalas ? salaTotals.map((t) => `<th class="num">${fmtQty(t)}</th>`).join("") : ""}<th class="num">${fmtQty(totalQty)}</th><th></th><th></th></tr>`;
+}
+
+["#pcProviderId", "#pcClientId", "#pcLocationId", "#pcPeriod"].forEach((selector) => {
+  $(selector).addEventListener("change", renderProviderControlPanel);
+});
+
 ["#balanceClientId", "#balanceLocationId", "#balancePeriod"].forEach((selector) => {
   $(selector).addEventListener("change", renderBalancePanel);
 });
@@ -1340,6 +1455,35 @@ function renderOpClientSelect() {
   if (state.clients.some((c) => c.id === prev)) select.value = prev;
 }
 
+/**
+ * Semana u OC a la que corresponde una factura de cliente, sacada de los
+ * remitos que cubre (NO de la fecha de emisión, que puede ser posterior).
+ * Semanal: "Sem. 32" o "Sem. 30–32" (rango si son consecutivas, lista si no).
+ * OC: "OC 1234" o "Sin OC". Mensual: el mes. Sin remitos: "-".
+ */
+function invoicePeriodLabel(inv) {
+  const items = (inv.deliveryIds || []).map((id) => byId(state.deliveries, id)).filter(Boolean);
+  if (!items.length) return "-";
+  const client = byId(state.clients, inv.clientId) || byId(state.clients, items[0].clientId);
+  if (client?.billingCycle === "po") {
+    const oc = String(inv.ocNumber || "").trim() || ocKeyForDelivery(items[0]);
+    return oc ? `OC ${oc}` : "Sin OC";
+  }
+  if (client?.billingCycle === "monthly") {
+    return [...new Set(items.map((d) => d.date.slice(0, 7)))].sort().join(", ");
+  }
+  const weeks = [...new Set(items.map((d) => Number(periodKeyFor(d))))].sort((a, b) => a - b);
+  if (weeks.length === 1) return `Sem. ${weeks[0]}`;
+  const consecutive = weeks.every((w, i) => i === 0 || w === weeks[i - 1] + 1);
+  return consecutive ? `Sem. ${weeks[0]}–${weeks[weeks.length - 1]}` : `Sem. ${weeks.join(", ")}`;
+}
+
+/** Detalle para el tooltip de la columna Sem./OC (rango de fechas de cada período). */
+function invoicePeriodTitle(inv) {
+  const items = (inv.deliveryIds || []).map((id) => byId(state.deliveries, id)).filter(Boolean);
+  return [...new Set(items.map((d) => periodLabelFor(d)))].join(" | ");
+}
+
 function renderOpInvoicePicker() {
   const clientId = $("#opClientId").value;
   const container = $("#opInvoicePicker");
@@ -1355,7 +1499,7 @@ function renderOpInvoicePicker() {
     return;
   }
   container.innerHTML = `<table class="picker-table">
-    <thead><tr><th></th><th>Sala</th><th>N Factura</th><th>Emisión</th><th class="num">Total c/IVA</th></tr></thead>
+    <thead><tr><th></th><th>Sala</th><th>N Factura</th><th>Sem. / OC</th><th>Emisión</th><th class="num">Total c/IVA</th></tr></thead>
     <tbody>
       ${candidates.map((inv) => {
         const loc = byId(state.locations, inv.locationId)?.name || "";
@@ -1363,6 +1507,7 @@ function renderOpInvoicePicker() {
           <td><input type="checkbox" class="op-invoice-check" data-invoice-id="${inv.id}" /></td>
           <td>${escapeHtml(loc)}</td>
           <td>${escapeHtml(inv.number)}</td>
+          <td title="${escapeHtml(invoicePeriodTitle(inv))}">${escapeHtml(invoicePeriodLabel(inv))}</td>
           <td>${fmtDDMMYY(inv.issueDate)}</td>
           <td class="num">${money(inv.amountGross)}</td>
         </tr>`;

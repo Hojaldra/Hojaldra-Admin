@@ -248,6 +248,18 @@
         </div>
 
         <div>
+          <h2>Control de entregas por proveedor</h2>
+          <p class="legend">Para confirmar con el proveedor las cantidades entregadas antes de que te facture. Es solo para tu control (no es lo que se le manda al cliente). No incluye devoluciones sin cobro ni las que cobra el cliente, porque a esas no se les paga al proveedor.</p>
+          <div class="toolbar">
+            <label>Proveedor<select id="pcProviderId"><option value="">Elegí...</option></select></label>
+            <label>Cliente<select id="pcClientId"><option value="">Elegí...</option></select></label>
+            <label>Sala<select id="pcLocationId"><option value="">Todas las salas</option></select></label>
+            <label>Semana / OC<select id="pcPeriod"><option value="">Elegí...</option></select></label>
+          </div>
+          <div class="table-wrap small"><table id="providerControlTable"><tbody id="providerControlRows"></tbody></table></div>
+        </div>
+
+        <div>
           <h2>Cobro y pago por sala y semana</h2>
           <p class="legend">Una fila por sala/periodo — la factura al cliente y la del proveedor, lado a lado. "Reclamar a proveedor" = la sala ya pagó pero todavía no le facturaste/pagaste al proveedor.</p>
           <div class="table-wrap"><table id="salaWeekTable"><tbody id="salaWeekRows"></tbody></table></div>
