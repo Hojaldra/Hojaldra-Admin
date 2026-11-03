@@ -2,11 +2,14 @@ const IVA_RATE = 0.21;
 const STORAGE_KEY = "hojaldra-admin-v4";
 
 // --- Backend en Google Sheets / Apps Script ---
-// Pegá acá la URL de tu implementación (termina en /exec) y el mismo token
-// que pusiste en Code.gs. Mientras diga "REEMPLAZAR", la app sigue andando
-// solo con localStorage (como hasta ahora), no se rompe nada.
+// Pegá acá la URL de tu implementación (termina en /exec). Mientras diga
+// "REEMPLAZAR", la app sigue andando solo con localStorage.
+// La CLAVE DE ACCESO ya no está escrita en el código: la app la pide la
+// primera vez que se abre en cada navegador y la guarda solo ahí. Las
+// claves reales (de edición y de solo lectura) viven en las Propiedades del
+// script de Google, no en GitHub.
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxtc0qqle_vhZc3qBhzSavyf1xhlypRDNj-PfD-aQWwnA31JKRa9NB_Wi-e7DRvO95k/exec";
-const APPS_SCRIPT_TOKEN = "f2MmUefHnfBuwQLr9lEiCJAoWx-xwuNQMwClY6q4m-E";
+const ACCESS_KEY_STORAGE = "hojaldra-clave";
 const CLOUD_CONFIGURED = !APPS_SCRIPT_URL.includes("REEMPLAZAR");
 
 const seed = {
@@ -112,10 +115,159 @@ const seed = {
 };
 
 // state arranca con un placeholder; boot() lo reemplaza por la copia real
-// (nube o local) antes del primer render(). Ningún formulario puede
-// enviarse antes de eso porque los <select> están vacíos hasta el primer
-// render() — así que no hay ventana real para pisar datos con el seed.
+// (nube o local) antes del primer render().
+//
+// OJO: render() termina llamando a saveState(). Si la carga desde la nube
+// fallaba y el navegador no tenía copia local, el estado quedaba en el
+// seed de demo y ese render() lo mandaba a la nube, PISANDO la base real
+// (pasó el 30/10/2026). Por eso ahora hay tres frenos (ver saveState):
+//   1. cloudReady: no se guarda nada hasta que la nube haya respondido bien.
+//   2. saveBlockedReason: si algo huele mal, se frena TODO (nube y
+//      localStorage) y se muestra un cartel hasta que se recargue.
+//   3. guardia de tamaño: no se pisa una base grande con una casi vacía.
 let state = structuredClone(seed);
+
+// Colecciones que se cuentan para detectar "se perdieron datos".
+const SCORED_COLLECTIONS = ["deliveries", "invoices", "paymentOrders", "checks", "directPayments", "expenses", "priceRules"];
+// Sin nube configurada se trabaja solo en local, como siempre.
+let cloudReady = !CLOUD_CONFIGURED;
+let saveBlockedReason = null;
+// Cantidad de registros de la última versión que la nube confirmó.
+let lastCloudScore = 0;
+// savedAt de la última versión confirmada en la nube (para verificar que
+// un guardado realmente la actualizó).
+let lastCloudSavedAt = null;
+// Lo prende el import en modo "reemplazar": el usuario ya confirmó que
+// quiere reemplazar todo, así que se permite UN guardado más chico.
+let allowShrinkOnce = false;
+
+function collectionCounts(s) {
+  const counts = {};
+  SCORED_COLLECTIONS.forEach((key) => {
+    counts[key] = s && Array.isArray(s[key]) ? s[key].length : 0;
+  });
+  return counts;
+}
+
+function stateScore(s) {
+  const counts = collectionCounts(s);
+  return SCORED_COLLECTIONS.reduce((sum, key) => sum + counts[key], 0);
+}
+
+function sameCounts(a, b) {
+  return SCORED_COLLECTIONS.every((key) => a[key] === b[key]);
+}
+
+// Rol que dice el servidor según la clave: "edit" (puede guardar) o "view"
+// (solo lectura). Si el servidor no informa rol, se asume solo lectura.
+let readOnly = false;
+// Lo prende saveState() cuando se permite un guardado más chico (import
+// "reemplazar"); pushCloudState() se lo avisa al servidor con force=1.
+let forceNextPush = false;
+
+function getAccessKey() {
+  try { return localStorage.getItem(ACCESS_KEY_STORAGE) || ""; } catch (err) { return ""; }
+}
+
+function forgetAccessKey() {
+  try { localStorage.removeItem(ACCESS_KEY_STORAGE); } catch (err) { /* nada */ }
+}
+
+function cloudUrl() {
+  return `${APPS_SCRIPT_URL}?key=${encodeURIComponent(getAccessKey())}`;
+}
+
+/**
+ * Pantalla que pide la clave. Frena todos los guardados mientras esté
+ * abierta. Al enviar, guarda la clave en este navegador y recarga.
+ */
+function requireAccessKey(message) {
+  saveBlockedReason = "clave";
+  clearTimeout(cloudSaveTimer);
+  cloudSaveQueued = false;
+  let el = document.getElementById("accessKeyOverlay");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "accessKeyOverlay";
+    el.style.cssText = "position:fixed;inset:0;z-index:1001;background:rgba(23,33,29,0.94);display:flex;align-items:center;justify-content:center;padding:24px;";
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `
+    <div style="max-width:420px;width:100%;background:#fff;color:#17211d;border-radius:10px;padding:24px;display:grid;gap:12px;">
+      <h2 style="margin:0;">Hojaldra Admin</h2>
+      <p>${escapeHtml(message || "Ingresá la clave de acceso.")}</p>
+      <input id="accessKeyInput" type="password" autocomplete="current-password" placeholder="Clave de acceso" />
+      <button type="button" id="accessKeyBtn">Entrar</button>
+      <p style="color:#66716b;font-size:12px;">La clave se guarda solo en este navegador. Usá "Salir" para olvidarla.</p>
+    </div>`;
+  const submit = () => {
+    const value = el.querySelector("#accessKeyInput").value.trim();
+    if (!value) return;
+    localStorage.setItem(ACCESS_KEY_STORAGE, value);
+    location.reload();
+  };
+  el.querySelector("#accessKeyBtn").addEventListener("click", submit);
+  el.querySelector("#accessKeyInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") submit();
+  });
+  el.querySelector("#accessKeyInput").focus();
+}
+
+/** Botón "Salir" y cartel de solo lectura (se arman por JS, sin tocar index.html). */
+function setupSessionUi() {
+  if (!CLOUD_CONFIGURED) return;
+  const actions = document.querySelector(".top-actions");
+  if (actions && !document.getElementById("logoutBtn")) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = "logoutBtn";
+    button.textContent = "Salir";
+    button.title = "Olvidar la clave en este navegador";
+    button.addEventListener("click", () => {
+      if (confirm("¿Salir y olvidar la clave en este navegador?")) {
+        forgetAccessKey();
+        location.reload();
+      }
+    });
+    actions.appendChild(button);
+  }
+  if (readOnly && !document.getElementById("readOnlyBanner")) {
+    const bar = document.createElement("div");
+    bar.id = "readOnlyBanner";
+    bar.textContent = "Modo solo lectura: podés mirar todo, pero los cambios no se guardan.";
+    bar.style.cssText = "background:#fff4d6;color:#7a4e09;font-weight:700;padding:8px 28px;border-bottom:1px solid #e6d7a8;";
+    document.body.insertBefore(bar, document.body.firstChild);
+  }
+}
+
+/**
+ * Frena todos los guardados (nube y localStorage) y muestra un cartel que
+ * tapa la pantalla. No borra ni modifica nada: recargar la página vuelve a
+ * intentar la carga desde la nube.
+ */
+function blockSaving(reason) {
+  saveBlockedReason = reason;
+  clearTimeout(cloudSaveTimer);
+  cloudSaveQueued = false;
+  showBlockedOverlay(reason);
+}
+
+function showBlockedOverlay(reason) {
+  let el = document.getElementById("saveBlockedOverlay");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "saveBlockedOverlay";
+    el.style.cssText = "position:fixed;inset:0;z-index:1000;background:rgba(23,33,29,0.92);display:flex;align-items:center;justify-content:center;padding:24px;";
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `
+    <div style="max-width:540px;background:#fff;color:#17211d;border-radius:10px;padding:24px;display:grid;gap:12px;">
+      <h2 style="margin:0;">Guardado frenado por seguridad</h2>
+      <p>${escapeHtml(reason)}</p>
+      <p>No se guardó ni se borró nada. Recargá la página para volver a intentar. Si sigue pasando, no cargues datos y avisá.</p>
+      <button type="button" onclick="location.reload()">Reintentar</button>
+    </div>`;
+}
 
 /**
  * Pedido tipo JSONP: agrega un <script> al documento en vez de usar
@@ -254,15 +406,46 @@ async function loadState() {
     return hydrate(cached);
   }
 
+  if (!getAccessKey()) {
+    setSyncStatus("sin-clave");
+    requireAccessKey("Ingresá la clave de acceso.");
+    return hydrate(null);
+  }
+
   try {
-    const url = `${APPS_SCRIPT_URL}?token=${encodeURIComponent(APPS_SCRIPT_TOKEN)}`;
-    const json = await jsonpRequest(url);
+    const json = await jsonpRequest(cloudUrl());
+    if (json.error === "unauthorized") {
+      forgetAccessKey();
+      setSyncStatus("sin-clave");
+      requireAccessKey("La clave no es correcta. Probá de nuevo.");
+      return hydrate(null);
+    }
     if (json.error) throw new Error(json.error);
+    readOnly = json.role !== "edit";
+
+    const hasCloudData = !!json.data && Object.keys(json.data).length > 0;
+    if (!hasCloudData && !cached) {
+      // Nube vacía Y sin copia local: la única opción sería arrancar del
+      // seed de demo y mandarlo a la nube. No se hace.
+      setSyncStatus("error");
+      blockSaving("La nube respondió sin datos y este navegador no tiene copia local. Por seguridad no se arranca con datos de demo.");
+      return hydrate(null);
+    }
+
+    cloudReady = true;
+    lastCloudSavedAt = json.savedAt || null;
     setSyncStatus("guardado", json.savedAt);
-    return hydrate(json.data || cached);
+    // Nube con datos: manda la nube. Nube vacía pero con copia local: es
+    // la migración inicial, se sube la copia local.
+    const loaded = hydrate(hasCloudData ? json.data : cached);
+    lastCloudScore = hasCloudData ? stateScore(loaded) : 0;
+    return loaded;
   } catch (err) {
-    console.error("No se pudo conectar con la nube, sigo con la copia local:", err);
+    // NO seguimos con la copia local: trabajar así y después guardar es
+    // justo lo que pisaba la nube con datos viejos o con el seed.
+    console.error("No se pudo cargar desde la nube:", err);
     setSyncStatus("offline");
+    blockSaving("No se pudo cargar la base desde la nube (sin conexión, o Google no respondió a tiempo).");
     return hydrate(cached);
   }
 }
@@ -345,6 +528,26 @@ function migrateRuleToCommission(item) {
  * tecla si hay varios cambios seguidos) y no bloquea la interfaz.
  */
 function saveState() {
+  // Frenado: no se toca ni la nube ni localStorage.
+  if (saveBlockedReason) return;
+  // Clave de solo lectura: se mira, no se guarda nada.
+  if (readOnly) return;
+
+  if (CLOUD_CONFIGURED) {
+    // La nube todavía no respondió bien: lo que hay en memoria puede ser
+    // el seed o una copia vieja, y no se guarda.
+    if (!cloudReady) return;
+
+    const shrinkOk = allowShrinkOnce;
+    allowShrinkOnce = false;
+    if (shrinkOk) forceNextPush = true;
+    const score = stateScore(state);
+    if (!shrinkOk && lastCloudScore >= 50 && score < lastCloudScore * 0.5) {
+      blockSaving(`El estado actual tiene ${score} registros y la última versión guardada en la nube tenía ${lastCloudScore}. Parece que se perdieron datos, así que no se guardó nada.`);
+      return;
+    }
+  }
+
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   scheduleCloudSave();
 }
@@ -360,7 +563,7 @@ let cloudSaveInFlight = false;
 let cloudSaveQueued = false;
 
 function scheduleCloudSave() {
-  if (!CLOUD_CONFIGURED) return;
+  if (!CLOUD_CONFIGURED || saveBlockedReason || readOnly) return;
   setSyncStatus("pendiente");
   clearTimeout(cloudSaveTimer);
   cloudSaveTimer = setTimeout(triggerCloudSave, 800);
@@ -375,19 +578,46 @@ function triggerCloudSave() {
 }
 
 async function pushCloudState() {
+  if (saveBlockedReason || readOnly || !cloudReady) return;
   cloudSaveInFlight = true;
   setSyncStatus("guardando");
   try {
+    const sentCounts = collectionCounts(state);
+    const previousSavedAt = lastCloudSavedAt;
+    const force = forceNextPush;
+    forceNextPush = false;
     submitHiddenForm(APPS_SCRIPT_URL, {
-      token: APPS_SCRIPT_TOKEN,
-      data: JSON.stringify(state)
+      key: getAccessKey(),
+      data: JSON.stringify(state),
+      force: force ? "1" : "0"
     });
     // Sin confirmación directa posible (ver submitHiddenForm) — le damos
     // un instante a Apps Script para procesar y confirmamos releyendo.
+    // Antes solo se miraba que no hubiera error, así que podía decir
+    // "Guardado" con una versión vieja. Ahora se exige que la nube
+    // devuelva la misma cantidad de registros que se mandó y un savedAt
+    // distinto al anterior. Con datos grandes Apps Script tarda, por eso
+    // se relee hasta 4 veces antes de dar el guardado por fallido.
     await wait(1200);
-    const url = `${APPS_SCRIPT_URL}?token=${encodeURIComponent(APPS_SCRIPT_TOKEN)}`;
-    const json = await jsonpRequest(url);
-    if (json.error) throw new Error(json.error);
+    const url = cloudUrl();
+    let json = null;
+    let confirmed = false;
+    for (let attempt = 0; attempt < 4 && !confirmed; attempt++) {
+      if (attempt > 0) await wait(1500);
+      json = await jsonpRequest(url);
+      if (json.error === "unauthorized") {
+        forgetAccessKey();
+        requireAccessKey("La clave cambió o ya no es válida. Ingresala de nuevo.");
+        throw new Error("unauthorized");
+      }
+      if (json.error) throw new Error(json.error);
+      confirmed = !!json.data
+        && sameCounts(collectionCounts(json.data), sentCounts)
+        && (!previousSavedAt || json.savedAt !== previousSavedAt);
+    }
+    if (!confirmed) throw new Error("La nube no devolvió lo que se acaba de guardar");
+    lastCloudScore = stateScore(json.data);
+    lastCloudSavedAt = json.savedAt || null;
     setSyncStatus("guardado", json.savedAt);
   } catch (err) {
     console.error("No se pudo confirmar el guardado en la nube (probablemente igual se guardó, revisar la Sheet):", err);
@@ -403,7 +633,7 @@ async function pushCloudState() {
 
 // Si se corta y vuelve la conexión, reintenta mandar lo último.
 window.addEventListener("online", () => {
-  if (CLOUD_CONFIGURED) triggerCloudSave();
+  if (CLOUD_CONFIGURED && cloudReady && !saveBlockedReason && !readOnly) triggerCloudSave();
 });
 
 function setSyncStatus(status, savedAt) {
@@ -415,7 +645,8 @@ function setSyncStatus(status, savedAt) {
     "guardado": time ? `Guardado en la nube · ${time}` : "Guardado en la nube",
     "guardando": "Guardando en la nube...",
     "pendiente": "Cambios sin guardar todavía...",
-    "offline": "Sin conexión — usando copia local",
+    "offline": "Sin conexión con la nube",
+    "sin-clave": "Falta la clave de acceso",
     "error": "No se pudo guardar en la nube — reintentando",
     "sin-configurar": "Guardado solo en este navegador (falta configurar la nube)"
   };
@@ -3402,6 +3633,7 @@ $("#importFile").addEventListener("change", async (event) => {
       event.target.value = "";
       return;
     }
+    allowShrinkOnce = true;
     state = imported;
     render();
   }
@@ -3419,6 +3651,10 @@ function slug(value) {
 async function boot() {
   setSyncStatus("cargando");
   state = await loadState();
+  // Si la carga quedó frenada, no se renderiza nada: el cartel tapa todo
+  // y render() terminaría llamando a saveState().
+  if (saveBlockedReason) return;
+  setupSessionUi();
   setDefaultDates();
   render();
 }
