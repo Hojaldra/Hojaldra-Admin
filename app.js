@@ -111,6 +111,11 @@ const seed = {
   // de cobros.
   directPayments: [],
   expenses: [],
+  // ivaPeriods: declaraciones de IVA (F.2051) que presenta el contador, una
+  // por mes, cargadas a mano: { id, period "AAAA-MM", debito, credito,
+  // retenciones, usos, saldoPrevio|null, saldoDDJJ|null }. Con eso el panel
+  // "Posición de IVA" arrastra el saldo a favor mes a mes igual que ARCA.
+  ivaPeriods: [],
   openingBalance: 0
 };
 
@@ -459,7 +464,8 @@ function hydrate(saved) {
     expenses: saved.expenses || [],
     paymentOrders: saved.paymentOrders || [],
     checks: saved.checks || [],
-    directPayments: saved.directPayments || []
+    directPayments: saved.directPayments || [],
+    ivaPeriods: saved.ivaPeriods || []
   };
   merged.priceRules = (merged.priceRules || []).map(migrateRuleToCommission);
   merged.checks = (merged.checks || []).map(migrateCheckAllocations);
@@ -1034,6 +1040,7 @@ function render() {
   renderProviderControlPanel();
   renderExpenses();
   renderMonthlyTable();
+  renderIvaPosition();
   renderPagosTab();
   saveState();
 }
@@ -1152,7 +1159,7 @@ function retIvaForDeliveries(rows) {
       .filter((d) => idsInView.has(d.id))
       .reduce((s, d) => s + totalsFor(d).saleNet, 0);
     const fraction = inViewSale / invTotalSale;
-    return sum + Number(inv.retIva || 0) * fraction;
+    return sum + invoiceRetentions(inv).retIva * fraction;
   }, 0);
 }
 
@@ -2299,8 +2306,161 @@ addFromForm($("#expenseForm"), "expenses", (v) => ({
   amount: Number(v.amount)
 }));
 
+// (el if protege por si app.js se actualiza sin el index.html nuevo)
+if ($("#ivaPeriodForm")) {
+  $("#ivaPeriodForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (saveIvaPeriod(formValues($("#ivaPeriodForm")))) {
+      $("#ivaPeriodForm").reset();
+      render();
+    }
+  });
+}
+
 function monthKey(dateText) {
   return dateText.slice(0, 7);
+}
+
+/** Fecha ISO usable (AAAA-MM-DD con año razonable). Atrapa vacías y typos como 0206-07-20. */
+function isValidISODate(text) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(text || "") && Number(text.slice(0, 4)) >= 2000;
+}
+
+/**
+ * Fecha en que un cobro cayó en el banco, para ubicarlo en un mes de
+ * Liquidez. Si el cheque/transferencia tiene fecha de pago válida se usa
+ * esa. Si no (vacía o con typo), se estima con la fecha de pago de la
+ * factura y, en última instancia, con la fecha de la OP — así la plata no
+ * desaparece del resumen. Estas estimaciones se avisan abajo de la tabla
+ * para que se corrija la fecha en la OP.
+ */
+function checkCashDate(check) {
+  if (isValidISODate(check.fechaPago)) return check.fechaPago;
+  const op = byId(state.paymentOrders, check.paymentOrderId);
+  if (!op) return "";
+  const paid = opInvoices(op).map((inv) => inv.paymentDate).filter(isValidISODate).sort();
+  if (paid.length) return paid[paid.length - 1];
+  return isValidISODate(op.date) ? op.date : "";
+}
+
+/**
+ * Posición de IVA mes a mes, con la misma mecánica que la DDJJ de ARCA
+ * (F.2051), a partir de los números que presenta el contador:
+ *   saldo técnico a favor de ARCA = débito − crédito (− saldo técnico a favor
+ *                                   del contribuyente que venga arrastrado)
+ *   disponible  = saldo previo (neto de usos) + retenciones/percepciones
+ *   se aplica   = lo menor entre disponible y lo que hay que pagar
+ *   en efectivo = lo que hay que pagar y el disponible no cubre (VEP)
+ *   saldo final = disponible − se aplica
+ *   pasa al mes siguiente = saldo final − usos posteriores (compensaciones
+ *                           contra IVA de otros períodos, devoluciones, etc.)
+ * Verificado contra las DDJJ de agosto y septiembre 2026.
+ * El saldo previo se arrastra solo; si se carga a mano en un período, pisa
+ * el arrastrado (sirve para el primer período cargado).
+ */
+function ivaPositionRows() {
+  const sorted = [...(state.ivaPeriods || [])].sort((a, b) => a.period.localeCompare(b.period));
+  let carry = 0;
+  let technicalCarry = 0;
+  return sorted.map((p) => {
+    const hasManualPrev = p.saldoPrevio !== null && p.saldoPrevio !== undefined && p.saldoPrevio !== "";
+    const previo = hasManualPrev ? Number(p.saldoPrevio) : carry;
+    const debito = Number(p.debito || 0);
+    const credito = Number(p.credito || 0);
+    const retenciones = Number(p.retenciones || 0);
+    const usos = Number(p.usos || 0);
+    const ivaPeriodo = round2(debito - credito);
+    const tecnico = round2(ivaPeriodo - technicalCarry);
+    const aFavorARCA = Math.max(0, tecnico);
+    const nextTechnicalCarry = tecnico < 0 ? -tecnico : 0;
+    const disponible = round2(previo + retenciones);
+    const aplicado = Math.min(disponible, aFavorARCA);
+    const efectivo = round2(aFavorARCA - aplicado);
+    const saldoFinal = round2(disponible - aplicado);
+    const pasa = round2(saldoFinal - usos);
+    const hasDDJJ = p.saldoDDJJ !== null && p.saldoDDJJ !== undefined && p.saldoDDJJ !== "";
+    const row = {
+      id: p.id, period: p.period, debito, credito, retenciones, usos, previo, ivaPeriodo,
+      aFavorARCA, efectivo, saldoFinal, pasa,
+      saldoDDJJ: hasDDJJ ? Number(p.saldoDDJJ) : null,
+      diff: hasDDJJ ? round2(saldoFinal - Number(p.saldoDDJJ)) : null
+    };
+    carry = pasa;
+    technicalCarry = nextTechnicalCarry;
+    return row;
+  });
+}
+
+/** Alta o corrección de un período de IVA (si ya existe ese mes, lo reemplaza). */
+function saveIvaPeriod(values) {
+  const num = (v) => (v === "" || v === null || v === undefined ? null : Number(v));
+  if (!/^\d{4}-\d{2}$/.test(values.period || "")) return false;
+  const item = {
+    id: cryptoId(),
+    period: values.period,
+    debito: Number(values.debito || 0),
+    credito: Number(values.credito || 0),
+    retenciones: Number(values.retenciones || 0),
+    usos: Number(values.usos || 0),
+    saldoPrevio: num(values.saldoPrevio),
+    saldoDDJJ: num(values.saldoDDJJ)
+  };
+  if (!Array.isArray(state.ivaPeriods)) state.ivaPeriods = []; // importaciones viejas no la traen
+  const idx = state.ivaPeriods.findIndex((x) => x.period === item.period);
+  if (idx >= 0) {
+    item.id = state.ivaPeriods[idx].id;
+    state.ivaPeriods[idx] = item;
+  } else {
+    state.ivaPeriods.push(item);
+  }
+  return true;
+}
+
+function renderIvaPosition() {
+  if (!$("#ivaRows") || !$("#ivaSummary")) return; // index.html viejo, sin el panel
+  const rows = ivaPositionRows();
+  if (!rows.length) {
+    $("#ivaRows").innerHTML = `<tr><td class="empty">Todavía no cargaste ninguna declaración de IVA.</td></tr>`;
+    $("#ivaSummary").innerHTML = "";
+    return;
+  }
+  const body = rows.map((r) => {
+    const control = r.diff === null ? "" : (Math.abs(r.diff) < 1 ? "✓ coincide" : `⚠ difiere ${money(r.diff)}`);
+    return `<tr>
+      <td>${escapeHtml(r.period)}</td>
+      <td class="num">${money(r.debito)}</td>
+      <td class="num">${money(r.credito)}</td>
+      <td class="num">${money(r.ivaPeriodo)}</td>
+      <td class="num">${money(r.previo)}</td>
+      <td class="num">${money(r.retenciones)}</td>
+      <td class="num">${money(r.efectivo)}</td>
+      <td class="num">${money(r.saldoFinal)}</td>
+      <td class="num">${money(r.usos)}</td>
+      <td class="num">${money(r.pasa)}</td>
+      <td>${control}</td>
+      <td><button type="button" data-edit-iva="${r.id}">Editar</button> <button type="button" data-delete-iva="${r.id}">Borrar</button></td>
+    </tr>`;
+  }).join("");
+  $("#ivaRows").innerHTML = `<tr>
+      <th>Período</th><th class="num">Débito fiscal</th><th class="num">Crédito fiscal</th><th class="num">IVA del período</th>
+      <th class="num">Saldo previo</th><th class="num">Retenciones y percepciones</th><th class="num">IVA a pagar en efectivo</th>
+      <th class="num">Saldo final</th><th class="num">Usado después</th><th class="num">Pasa al mes siguiente</th><th>Control vs DDJJ</th><th></th>
+    </tr>${body}`;
+
+  const last = rows[rows.length - 1];
+  const recent = rows.slice(-3);
+  const avg = recent.reduce((sum, r) => sum + Math.max(0, r.ivaPeriodo), 0) / recent.length;
+  const parts = [`Saldo de IVA a favor que pasa al mes siguiente (después de ${escapeHtml(last.period)}): <strong>${money(last.pasa)}</strong>.`];
+  if (last.efectivo > 0) {
+    parts.push(`En ${escapeHtml(last.period)} hubo IVA a pagar en efectivo: <strong>${money(last.efectivo)}</strong> (cargalo en Gastos cuando lo pagues).`);
+  }
+  if (last.pasa <= 0) {
+    parts.push("No queda saldo a favor: el IVA de los próximos períodos sale del banco.");
+  } else if (avg > 0) {
+    const months = last.pasa / avg;
+    parts.push(`IVA promedio de los últimos ${recent.length} período(s): ${money(avg)}. Sin retenciones nuevas, ese saldo cubre unos <strong>${months.toFixed(1).replace(".", ",")} meses</strong> de IVA; después el IVA sale del banco. Es una estimación: el IVA cambia bastante de un mes a otro.`);
+  }
+  $("#ivaSummary").innerHTML = parts.join(" ");
 }
 
 /**
@@ -2319,6 +2479,12 @@ function renderMonthlyTable() {
   state.deliveries.forEach((d) => months.add(monthKey(d.date)));
   state.invoices.forEach((inv) => { if (inv.paymentDate) months.add(monthKey(inv.paymentDate)); });
   state.expenses.forEach((e) => months.add(monthKey(e.date)));
+  state.paymentOrders.forEach((op) => { if (isValidISODate(op.date)) months.add(monthKey(op.date)); });
+  state.checks.forEach((c) => {
+    const d = c.status === "ACREDITADO" ? checkCashDate(c) : "";
+    if (d) months.add(monthKey(d));
+  });
+  (state.directPayments || []).forEach((p) => { if (p.fecha) months.add(monthKey(p.fecha)); });
   const sortedMonths = [...months].sort();
 
   if (!sortedMonths.length) {
@@ -2332,7 +2498,7 @@ function renderMonthlyTable() {
       <th rowspan="2">Mes</th>
       <th colspan="3" class="group-devengado">Devengado (contable — cobrés o no)</th>
       <th colspan="3" class="group-caja">Caja real (banco — solo plata que entró/salió)</th>
-      <th colspan="2" class="group-iva">IVA</th>
+      <th colspan="4" class="group-iva">Impuestos (retenciones sufridas e IVA)</th>
     </tr>
     <tr>
       <th class="num">Ganancia del mes</th>
@@ -2341,13 +2507,15 @@ function renderMonthlyTable() {
       <th class="num">Cobrado</th>
       <th class="num">Pagado a prov.</th>
       <th class="num">Caja acumulada</th>
-      <th class="num">Retenido por clientes</th>
-      <th class="num">A reservar (neto)</th>
+      <th class="num">IVA retenido</th>
+      <th class="num">Ganancias retenida</th>
+      <th class="num">IIBB retenido</th>
+      <th class="num">IVA a reservar (neto; − = a favor)</th>
     </tr>`;
 
   let accruedCum = 0;
   let cashCum = openingBalance;
-  let totalAccrued = 0, totalExpenses = 0, totalCobrado = 0, totalPagado = 0, totalIvaRetenido = 0, totalIvaNeto = 0;
+  let totalAccrued = 0, totalExpenses = 0, totalCobrado = 0, totalPagado = 0, totalIvaRetenido = 0, totalGanRetenida = 0, totalIibbRetenido = 0, totalIvaNeto = 0;
   const rowsHtml = sortedMonths.map((month) => {
     const accrued = state.deliveries
       .filter((d) => monthKey(d.date) === month)
@@ -2371,14 +2539,29 @@ function renderMonthlyTable() {
     // lado de pagos a proveedor, son los pagos directos (efectivo/
     // transferencia) que se registraron a mano — nunca lo endosado.
     const cobradoReal = round2(state.checks
-      .filter((c) => c.status === "ACREDITADO" && c.fechaPago && monthKey(c.fechaPago) === month)
+      .filter((c) => {
+        if (c.status !== "ACREDITADO") return false;
+        const d = checkCashDate(c);
+        return d && monthKey(d) === month;
+      })
       .reduce((sum, c) => sum + Number(c.monto || 0), 0));
     const pagadoReal = round2((state.directPayments || [])
       .filter((p) => p.fecha && monthKey(p.fecha) === month)
       .reduce((sum, p) => sum + Number(p.monto || 0), 0));
-    const ivaRetenido = state.invoices
-      .filter((inv) => inv.type === "client" && inv.status === "PAGO" && inv.paymentDate && monthKey(inv.paymentDate) === month)
-      .reduce((sum, inv) => sum + Number(inv.retIva || 0), 0);
+    // Retenciones sufridas: salen de las OPs del mes (el cliente retiene al
+    // emitir el pago). El cobrado de arriba ya viene neto de estas retenciones.
+    const retMonth = state.paymentOrders
+      .filter((op) => isValidISODate(op.date) && monthKey(op.date) === month)
+      .reduce((acc, op) => {
+        const b = opBreakdown(op);
+        acc.iva += b.retIva;
+        acc.gan += b.retGanancias;
+        acc.iibb += b.retIIBB;
+        return acc;
+      }, { iva: 0, gan: 0, iibb: 0 });
+    const ivaRetenido = round2(retMonth.iva);
+    const ganRetenida = round2(retMonth.gan);
+    const iibbRetenido = round2(retMonth.iibb);
     const cashResult = cobradoReal - pagadoReal - expensesMonth;
     cashCum += cashResult;
     const ivaNeto = ivaDevengado - ivaRetenido;
@@ -2388,6 +2571,8 @@ function renderMonthlyTable() {
     totalCobrado += cobradoReal;
     totalPagado += pagadoReal;
     totalIvaRetenido += ivaRetenido;
+    totalGanRetenida += ganRetenida;
+    totalIibbRetenido += iibbRetenido;
     totalIvaNeto += ivaNeto;
 
     return `<tr>
@@ -2399,6 +2584,8 @@ function renderMonthlyTable() {
       <td class="num">${money(pagadoReal)}</td>
       <td class="num">${money(cashCum)}</td>
       <td class="num">${money(ivaRetenido)}</td>
+      <td class="num">${money(ganRetenida)}</td>
+      <td class="num">${money(iibbRetenido)}</td>
       <td class="num">${money(ivaNeto)}</td>
     </tr>`;
   }).join("");
@@ -2412,10 +2599,25 @@ function renderMonthlyTable() {
       <th class="num">${money(totalPagado)}</th>
       <th class="num">${money(cashCum)}</th>
       <th class="num">${money(totalIvaRetenido)}</th>
+      <th class="num">${money(totalGanRetenida)}</th>
+      <th class="num">${money(totalIibbRetenido)}</th>
       <th class="num">${money(totalIvaNeto)}</th>
     </tr>`;
 
-  $("#monthlyRows").innerHTML += rowsHtml + totalsRow;
+  // Aviso de fechas a corregir: cobros cuya fecha de pago está vacía o mal
+  // cargada (se contaron igual, en un mes estimado).
+  const estimated = state.checks.filter((c) =>
+    c.status === "ACREDITADO" && Number(c.monto || 0) > 0 && !isValidISODate(c.fechaPago)
+  );
+  const warningRow = estimated.length
+    ? `<tr><td colspan="11" class="legend">⚠️ Revisá la fecha de cobro de ${estimated.length} pago(s) (suman ${money(estimated.reduce((s, c) => s + Number(c.monto || 0), 0))}): la fecha está vacía o mal cargada, así que se contaron en un mes estimado. Corregila en la OP: ${estimated.map((c) => {
+        const op = byId(state.paymentOrders, c.paymentOrderId);
+        const d = checkCashDate(c);
+        return `${escapeHtml(op ? (op.number || op.id) : "sin OP")} (${money(c.monto)} → ${d ? monthKey(d) : "sin mes"})`;
+      }).join("; ")}.</td></tr>`
+    : "";
+
+  $("#monthlyRows").innerHTML += rowsHtml + totalsRow + warningRow;
 }
 
 $("#openingBalance").addEventListener("input", (event) => {
@@ -2494,14 +2696,13 @@ function invoiceRowData(item) {
       : distinctLocations.length === 1
         ? byId(state.locations, distinctLocations[0])?.name || ""
         : "";
-  const retIva = Number(item.retIva || 0);
-  const retGan = Number(item.retGanancias || 0);
+  const ret = invoiceRetentions(item);
   const op = item.type === "client" ? clientInvoiceOP(item.id) : null;
   return {
     ...item,
     entity,
     location,
-    neto: Number(item.amountGross || 0) - retIva - retGan,
+    neto: Number(item.amountGross || 0) - ret.retIva - ret.retGanancias - ret.retIIBB,
     deliveryCount: (item.deliveryIds || []).length,
     op
   };
@@ -2618,6 +2819,34 @@ function opIsFullyResolved(op) {
 
 function clientInvoiceOP(invoiceId) {
   return state.paymentOrders.find((op) => (op.invoiceIds || []).includes(invoiceId));
+}
+
+/**
+ * Retenciones que un cliente le hizo a Hojaldra en UNA factura (IVA,
+ * Ganancias, IIBB). La fuente de verdad son las OPs (opBreakdown), no los
+ * campos viejos retIva/retGanancias de la factura: hoy nadie los carga y
+ * valen 0, por eso las retenciones no se veían en Liquidez ni en Facturas.
+ * Una OP puede juntar varias facturas: su retención se prorratea según el
+ * peso de cada factura en el total bruto de la OP. Solo si la factura no
+ * tiene OP (o es de proveedor) se usan los campos viejos, por compatibilidad.
+ */
+function invoiceRetentions(inv) {
+  const legacy = {
+    retIva: Number(inv.retIva || 0),
+    retGanancias: Number(inv.retGanancias || 0),
+    retIIBB: 0
+  };
+  if (inv.type !== "client") return legacy;
+  const op = clientInvoiceOP(inv.id);
+  if (!op) return legacy;
+  const b = opBreakdown(op);
+  if (!(b.totalGross > 0)) return legacy;
+  const share = Number(inv.amountGross || 0) / b.totalGross;
+  return {
+    retIva: round2(b.retIva * share),
+    retGanancias: round2(b.retGanancias * share),
+    retIIBB: round2(b.retIIBB * share)
+  };
 }
 
 /** Cheques (o la porción de un cheque) que quedaron aplicados a esta factura de proveedor, vía allocations. */
@@ -2752,9 +2981,7 @@ function renderInvoices() {
     const entity = item.entity;
     const location = item.location;
     const nDeliveries = item.deliveryCount;
-    const retIva = Number(item.retIva || 0);
-    const retGan = Number(item.retGanancias || 0);
-    const neto = Number(item.amountGross || 0) - retIva - retGan;
+    const neto = item.neto;
     const ocCell = item.type === "client"
       ? `<input type="text" value="${escapeHtml(item.ocNumber || "")}" placeholder="N° OC" data-oc-invoice="${item.id}" class="ret-input" />`
       : `<span class="cell-sub">-</span>`;
@@ -3452,6 +3679,30 @@ document.body.addEventListener("click", (event) => {
     state.expenses = state.expenses.filter((item) => item.id !== expenseId);
     render();
   }
+  const ivaDeleteId = event.target.dataset?.deleteIva;
+  const ivaEditId = event.target.dataset?.editIva;
+  if (ivaDeleteId) {
+    const item = (state.ivaPeriods || []).find((x) => x.id === ivaDeleteId);
+    if (item && confirm(`¿Borrar la declaración de IVA de ${item.period}?`)) {
+      state.ivaPeriods = (state.ivaPeriods || []).filter((x) => x.id !== ivaDeleteId);
+      render();
+    }
+  }
+  if (ivaEditId) {
+    const item = (state.ivaPeriods || []).find((x) => x.id === ivaEditId);
+    const form = $("#ivaPeriodForm");
+    if (item && form) {
+      const set = (name, value) => { form.elements[name].value = value === null || value === undefined ? "" : value; };
+      set("period", item.period);
+      set("debito", item.debito);
+      set("credito", item.credito);
+      set("retenciones", item.retenciones);
+      set("usos", item.usos || "");
+      set("saldoPrevio", item.saldoPrevio);
+      set("saldoDDJJ", item.saldoDDJJ);
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
   if (deliveryId) {
     if (clientInvoicedDeliveryIds().has(deliveryId) || providerInvoicedDeliveryIds().has(deliveryId)) {
       alert("Este remito ya está vinculado a una factura — no se puede borrar así nomás. Primero borrá o corregí esa factura desde la pestaña Facturas.");
@@ -3612,6 +3863,16 @@ function mergeState(imported) {
     if (!existingDirectPaymentIds.has(p.id)) {
       state.directPayments.push(p);
       existingDirectPaymentIds.add(p.id);
+    }
+  });
+
+  // Declaraciones de IVA: se agregan solo los períodos que todavía no están cargados.
+  const existingIvaPeriods = new Set((state.ivaPeriods || []).map((p) => p.period));
+  (imported.ivaPeriods || []).forEach((p) => {
+    if (!existingIvaPeriods.has(p.period)) {
+      if (!Array.isArray(state.ivaPeriods)) state.ivaPeriods = [];
+      state.ivaPeriods.push(p);
+      existingIvaPeriods.add(p.period);
     }
   });
 
