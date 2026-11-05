@@ -2,7 +2,7 @@ const IVA_RATE = 0.21;
 const STORAGE_KEY = "hojaldra-admin-v4";
 // Parámetros de impuestos (editables desde Liquidez). Los valores iniciales son
 // aproximaciones nuestras, no del contador: Ganancias 25% se revisa con él.
-const TAX_PARAM_DEFAULTS = { iibbPct: 3.18, gananciasPct: 25, sircrebPct: 2, chequePct: 1.2, cabaCoefPct: 61, resultadoPrevio: 0, ivaBandPorMes: 1000000 };
+const TAX_PARAM_DEFAULTS = { iibbPct: 3.18, gananciasPct: 25, sircrebPct: 2, chequePct: 1.2, cabaCoefPct: 61, resultadoPrevio: 0, ivaBandPorMes: 1000000, honorariosMensual: 2000000 };
 
 // --- Backend en Google Sheets / Apps Script ---
 // Pegá acá la URL de tu implementación (termina en /exec). Mientras diga
@@ -1429,10 +1429,18 @@ function renderSalaWeekRows(rows) {
     : `<tr><td class="empty">Sin datos.</td></tr>`;
 }
 
+// Lista de remitos compacta: hasta 4 se muestran tal cual; si hay más, el resto
+// queda plegado y se abre al tocar, así la fila no se alarga sin fin.
+function remitoListHtml(list) {
+  const items = [...list].filter(Boolean).map((x) => escapeHtml(String(x)));
+  if (items.length <= 4) return items.join(", ");
+  return `<details><summary>${items.slice(0, 3).join(", ")} <span class="cell-sub">+${items.length - 3} más</span></summary>${items.slice(3).join(", ")}</details>`;
+}
+
 function rowForSalaWeek(group) {
   const ids = group.deliveryIds;
   const deliveries = ids.map((id) => byId(state.deliveries, id)).filter(Boolean);
-  const remitos = [...new Set(deliveries.map((d) => d.receiptNo))].join(", ");
+  const remitos = remitoListHtml(new Set(deliveries.map((d) => d.receiptNo)));
 
   // OJO: antes usaba .find() y solo agarraba la PRIMERA factura que tocara
   // este grupo. Si dos remitos del mismo cliente/sala/semana terminaban en
@@ -1470,7 +1478,7 @@ function rowForSalaWeek(group) {
   return `<tr>
     <td>${escapeHtml(group.client)}</td>
     <td>${escapeHtml(group.location)}</td>
-    <td>${escapeHtml(group.period)}<br><span class="cell-sub">Remitos: ${escapeHtml(remitos)}</span></td>
+    <td>${escapeHtml(group.period)}<br><span class="cell-sub">Remitos: ${remitos}</span></td>
     <td>${clientCell}</td>
     <td>${providerCell}</td>
     <td>${estado}</td>
@@ -1565,7 +1573,7 @@ function renderBalancePanel() {
       <td class="num">${r.qty.toLocaleString("es-AR")}</td>
       <td class="num">${money(r.saleNet)}</td>
       <td class="num">${money(r.saleNet * (1 + IVA_RATE))}</td>
-      <td>${escapeHtml([...r.remitos].join(", "))}</td>
+      <td>${remitoListHtml([...r.remitos])}</td>
       <td>${r.invoiceNumbers.length ? escapeHtml(r.invoiceNumbers.join(", ")) : `<span class="cell-sub">sin facturar</span>`}</td>
     </tr>`).join("")}
     <tr><th>TOTAL</th><th class="num">${totalQty.toLocaleString("es-AR")}</th><th class="num">${money(totalSale)}</th><th class="num">${money(totalSale * (1 + IVA_RATE))}</th><th></th><th></th></tr>`;
@@ -1642,9 +1650,10 @@ function renderProviderControlPanel() {
 
   const byProduct = new Map();
   group.forEach((d) => {
-    const current = byProduct.get(d.productId) || { qty: 0, bySala: new Map(), remitos: new Set(), ids: [] };
+    const current = byProduct.get(d.productId) || { qty: 0, cost: 0, bySala: new Map(), remitos: new Set(), ids: [] };
     const qty = Number(d.quantity || 0);
     current.qty += qty;
+    current.cost += totalsFor(d).providerNet;
     current.bySala.set(d.locationId, (current.bySala.get(d.locationId) || 0) + qty);
     if (d.receiptNo) current.remitos.add(d.receiptNo);
     current.ids.push(d.id);
@@ -1665,20 +1674,25 @@ function renderProviderControlPanel() {
 
   const fmtQty = (n) => Number(n).toLocaleString("es-AR");
   const totalQty = rows.reduce((s, r) => s + r.qty, 0);
+  // Importes al COSTO del proveedor (lo que te va a facturar), con su alícuota de IVA.
+  const provIva = 1 + providerIvaRate(providerId);
+  const totalCost = rows.reduce((s, r) => s + r.cost, 0);
   const salaTotals = salaIds.map((id) => rows.reduce((s, r) => s + (r.bySala.get(id) || 0), 0));
   const salaHeaders = showSalas ? salaIds.map((id) => `<th class="num">${escapeHtml(byId(state.locations, id)?.name || "")}</th>`).join("") : "";
 
   rowsEl.innerHTML = `<tr>
-      <th>Producto</th>${salaHeaders}<th class="num">Cantidad total</th><th>N° Remitos</th><th>N° Factura proveedor</th>
+      <th>Producto</th>${salaHeaders}<th class="num">Cantidad total</th><th class="num">$ s/iva</th><th class="num">$ c/iva</th><th>N° Remitos</th><th>N° Factura proveedor</th>
     </tr>
     ${rows.map((r) => `<tr>
       <td>${escapeHtml(r.productName)}</td>
       ${showSalas ? salaIds.map((id) => `<td class="num">${r.bySala.get(id) ? fmtQty(r.bySala.get(id)) : "-"}</td>`).join("") : ""}
       <td class="num">${fmtQty(r.qty)}</td>
-      <td>${escapeHtml([...r.remitos].join(", "))}</td>
+      <td class="num">${money(r.cost)}</td>
+      <td class="num">${money(r.cost * provIva)}</td>
+      <td>${remitoListHtml([...r.remitos])}</td>
       <td>${r.invoiceNumbers.length ? escapeHtml(r.invoiceNumbers.join(", ")) : `<span class="cell-sub">sin facturar</span>`}</td>
     </tr>`).join("")}
-    <tr><th>TOTAL</th>${showSalas ? salaTotals.map((t) => `<th class="num">${fmtQty(t)}</th>`).join("") : ""}<th class="num">${fmtQty(totalQty)}</th><th></th><th></th></tr>`;
+    <tr><th>TOTAL</th>${showSalas ? salaTotals.map((t) => `<th class="num">${fmtQty(t)}</th>`).join("") : ""}<th class="num">${fmtQty(totalQty)}</th><th class="num">${money(totalCost)}</th><th class="num">${money(totalCost * provIva)}</th><th></th><th></th></tr>`;
 }
 
 ["#pcProviderId", "#pcClientId", "#pcLocationId", "#pcPeriod"].forEach((selector) => {
@@ -2365,16 +2379,12 @@ function iibbPendienteFor(ym) {
 }
 
 // Costos del mes (devengado): gastos reales por "mes que corresponde" (sin los
-// retiros del dueño) + costos fijos vigentes de las categorías sin gasto real ese mes.
+// retiros del dueño). Si todavía no cargaste los honorarios de ese mes (se pagan
+// a mes vencido), se usa el monto mensual estimado de los parámetros.
 function monthCosts(ym) {
   const real = state.expenses.filter((e) => (e.periodMonth || monthKey(e.date)) === ym && e.category !== "Retiro del dueño");
   let total = real.reduce((s, e) => s + Number(e.amount), 0);
-  const realCats = new Set(real.map((e) => e.category));
-  const latest = {};
-  state.fixedCosts.filter((c) => c.from <= ym).forEach((c) => {
-    if (!latest[c.category] || c.from >= latest[c.category].from) latest[c.category] = c;
-  });
-  Object.values(latest).forEach((c) => { if (!realCats.has(c.category)) total += Number(c.amount); });
+  if (!real.some((e) => e.category === "Honorarios administración")) total += Number(state.taxParams.honorariosMensual || 0);
   return total;
 }
 
@@ -2452,7 +2462,7 @@ function renderFlowBlock() {
   });
 
   $("#flowRows").innerHTML = `<tr><th>Mes</th><th class="num">Cobrado</th><th class="num">− SIRCREB (est.)</th><th class="num">− Imp. cheque (est.)</th><th class="num">− Pagado a prov.</th><th class="num">− Gastos</th><th class="num">− Impuestos pagados</th><th class="num">Flujo neto</th><th class="num">Retiros del dueño</th><th class="num">Acumulado desde agosto</th></tr>${flowHtml.join("")}`;
-  $("#devRows").innerHTML = `<tr><th>Mes</th><th class="num">Ganancia (remitos)</th><th class="num">− Gastos y costos fijos</th><th class="num">− Autónomos</th><th class="num">− IIBB</th><th class="num">− Imp. cheque</th><th class="num">Resultado antes de Ganancias</th><th class="num">− Ganancias (est.)</th><th class="num">Le queda a Pocho</th></tr>${devHtml.join("")}`;
+  $("#devRows").innerHTML = `<tr><th>Mes</th><th class="num">Ganancia (remitos)</th><th class="num">− Gastos y honorarios</th><th class="num">− Autónomos</th><th class="num">− IIBB</th><th class="num">− Imp. cheque</th><th class="num">Resultado antes de Ganancias</th><th class="num">− Ganancias (est.)</th><th class="num">Le queda a Pocho</th></tr>${devHtml.join("")}`;
 
   const band = Number(p.ivaBandPorMes || 0);
   const ivaKnown = Boolean(lastIva);
@@ -2569,11 +2579,6 @@ function renderTaxBlock() {
       return `<tr><td>${ym}</td><td class="num">${monto}</td><td>${status(t)}</td><td>${t && t.payDate ? fmtDDMMYY(t.payDate) : ""}</td><td>${actions("AUTONOMOS", ym, t)}</td></tr>`;
     }).join("");
 
-  const fc = [...state.fixedCosts].sort((a, b) => a.category.localeCompare(b.category) || a.from.localeCompare(b.from));
-  $("#fixedCostRows").innerHTML = fc.length
-    ? `<tr><th>Categoría</th><th>Concepto</th><th>Desde</th><th class="num">Monto/mes</th><th></th></tr>`
-      + fc.map((c) => `<tr><td>${escapeHtml(c.category)}</td><td>${escapeHtml(c.label || "")}</td><td>${c.from}</td><td class="num">${money(c.amount)}</td><td><button type="button" data-delete-fixedcost="${c.id}">Borrar</button></td></tr>`).join("")
-    : `<tr><td class="empty">Sin costos fijos cargados.</td></tr>`;
 }
 
 // "Mes que corresponde" de un gasto: por defecto el mes de la fecha; los
@@ -2668,10 +2673,6 @@ if ($("#taxPeriodForm")) {
   });
 }
 
-if ($("#fixedCostForm")) {
-  addFromForm($("#fixedCostForm"), "fixedCosts", (v) => ({ id: cryptoId(), category: v.category, label: v.label, amount: Number(v.amount), from: v.from }));
-}
-
 document.body.addEventListener("click", (event) => {
   const d = event.target.dataset || {};
   const form = $("#taxPeriodForm");
@@ -2698,11 +2699,6 @@ document.body.addEventListener("click", (event) => {
     set("tax", tax);
     set("period", ym);
     form.scrollIntoView({ behavior: "smooth" });
-  }
-  if (d.deleteFixedcost) {
-    ensureTaxState();
-    state.fixedCosts = state.fixedCosts.filter((x) => x.id !== d.deleteFixedcost);
-    render();
   }
 });
 
@@ -2910,7 +2906,7 @@ function renderMonthlyTable() {
       <th class="num">IVA retenido</th>
       <th class="num">Ganancias retenida</th>
       <th class="num">IIBB retenido</th>
-      <th class="num">IVA a reservar (neto; − = a favor)</th>
+      <th class="num">IVA del mes (bruto, sin saldo a favor; − = a favor)</th>
     </tr>`;
 
   let accruedCum = 0;
@@ -3056,7 +3052,7 @@ function renderProviderPayables(rows) {
   const totalPending = grouped.reduce((sum, item) => sum + item.pending, 0);
   $("#payableRows").innerHTML = grouped.length
     ? `<tr><th>Proveedor</th><th>Periodo</th><th>Remitos</th><th class="num">Devengado c/IVA</th><th class="num">Pendiente de pago</th></tr>
-      ${grouped.map((item) => `<tr><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.period)}</td><td>${escapeHtml(item.receiptNos.join(", "))}</td><td class="num">${money(item.total)}</td><td class="num">${money(item.pending)}</td></tr>`).join("")}
+      ${grouped.map((item) => `<tr><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.period)}</td><td>${remitoListHtml(item.receiptNos)}</td><td class="num">${money(item.total)}</td><td class="num">${money(item.pending)}</td></tr>`).join("")}
       <tr><th colspan="3">Total proveedores</th><th class="num">${money(total)}</th><th class="num">${money(totalPending)}</th></tr>`
     : `<tr><td class="empty">Sin datos.</td></tr>`;
 }

@@ -249,7 +249,7 @@
 
         <div>
           <h2>Control de entregas por proveedor</h2>
-          <p class="legend">Para confirmar con el proveedor las cantidades entregadas antes de que te facture. Es solo para tu control (no es lo que se le manda al cliente). No incluye devoluciones sin cobro ni las que cobra el cliente, porque a esas no se les paga al proveedor.</p>
+          <p class="legend">Para confirmar con el proveedor las cantidades entregadas antes de que te facture. Es solo para tu control (no es lo que se le manda al cliente). Los importes son tu costo con ese proveedor, es decir, lo que te va a facturar. No incluye devoluciones sin cobro ni las que cobra el cliente, porque a esas no se les paga al proveedor.</p>
           <div class="toolbar">
             <label>Proveedor<select id="pcProviderId"><option value="">Elegí...</option></select></label>
             <label>Cliente<select id="pcClientId"><option value="">Elegí...</option></select></label>
@@ -455,6 +455,7 @@
                 <label>Ganancias (%)<input name="gananciasPct" type="number" step="0.1" min="0" /></label>
                 <label>Resultado previo a agosto (lo da el contador)<input name="resultadoPrevio" type="number" step="0.01" /></label>
                 <label>Margen de error del IVA estimado, por mes<input name="ivaBandPorMes" type="number" step="1000" min="0" /></label>
+                <label>Honorarios mensuales estimados<input name="honorariosMensual" type="number" step="1000" min="0" /></label>
               </form>
               <form id="taxPeriodForm">
                 <h3>Cargar o corregir un impuesto</h3>
@@ -479,30 +480,13 @@
                 <label>Fecha de pago<input name="payDate" type="date" /></label>
                 <button type="submit">Guardar</button>
               </form>
-              <form id="fixedCostForm">
-                <h3>Costo fijo estimado</h3>
-                <label>Categoría
-                  <select name="category">
-                    <option>Honorarios administración</option>
-                    <option>Combustible y peajes</option>
-                    <option>Contador</option>
-                    <option>Otros</option>
-                  </select>
-                </label>
-                <label>Concepto<input name="label" /></label>
-                <label>Monto por mes<input name="amount" type="number" min="0" step="0.01" required /></label>
-                <label>Rige desde<input name="from" type="month" required /></label>
-                <button type="submit">Agregar costo fijo</button>
-              </form>
             </div>
             <div>
               <h3>IIBB por período</h3>
               <div class="table-wrap small"><table><tbody id="iibbRows"></tbody></table></div>
               <h3>Autónomos por período</h3>
               <div class="table-wrap small"><table><tbody id="autRows"></tbody></table></div>
-              <h3>Costos fijos cargados</h3>
-              <div class="table-wrap small"><table><tbody id="fixedCostRows"></tbody></table></div>
-              <p class="legend">Un costo fijo vale como estimación de cada mes desde su fecha de inicio, hasta que cargues el gasto real de esa categoría y mes (el real reemplaza a la estimación). Las tablas de devengado, percibido y reservas que usan esto llegan en el Bloque 2.</p>
+              <p class="legend">Honorarios: si todavía no cargaste el gasto "Honorarios administración" de un mes, la app usa el monto mensual estimado de los parámetros; cuando lo cargues, reemplaza a la estimación. Nafta, peajes y el resto se cargan como gastos comunes.</p>
             </div>
           </div>
         </div>
@@ -521,7 +505,7 @@
 
         <div>
           <h2>Resumen mensual: devengado vs. caja real</h2>
-          <p class="legend"><strong>Devengado</strong> = lo que ganaste según los remitos entregados ese mes, los hayas cobrado o no. Sirve para saber si el negocio es rentable. <strong>Caja real</strong> = solo la plata que efectivamente entró o salió del banco (facturas ya marcadas PAGO, neto de retenciones). Sirve para saber si tenés efectivo disponible. Los dos números casi nunca coinciden, y está bien que así sea — la diferencia es justamente lo que todavía tenés pendiente de cobrar o pagar.</p>
+          <p class="legend">Ojo con la última columna: es el IVA de cada mes por separado, sin descontar el saldo a favor de ARCA. Lo que realmente hay que reservar está en "Reservas y disponible real", más arriba. <strong>Devengado</strong> = lo que ganaste según los remitos entregados ese mes, los hayas cobrado o no. Sirve para saber si el negocio es rentable. <strong>Caja real</strong> = solo la plata que efectivamente entró o salió del banco (facturas ya marcadas PAGO, neto de retenciones). Sirve para saber si tenés efectivo disponible. Los dos números casi nunca coinciden, y está bien que así sea — la diferencia es justamente lo que todavía tenés pendiente de cobrar o pagar.</p>
           <label style="max-width:260px">Saldo inicial de caja (opcional)
             <input id="openingBalance" type="number" step="0.01" placeholder="cuánto había en el banco al empezar" />
           </label>

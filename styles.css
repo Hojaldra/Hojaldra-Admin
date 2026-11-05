@@ -237,7 +237,7 @@ select {
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 960px;
+  min-width: 0;
 }
 
 .report-grid table {
@@ -257,7 +257,8 @@ td {
   padding: 9px 10px;
   border-bottom: 1px solid var(--line);
   text-align: left;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 th {
@@ -291,6 +292,12 @@ th.sortable.sort-active .sort-arrow {
 td.num,
 th.num {
   text-align: right;
+}
+
+/* Los importes no se parten; los títulos de columna sí, para que la tabla entre en pantalla. */
+td.num {
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 .status {
@@ -550,7 +557,7 @@ li {
 
 .deliveries-table {
   table-layout: fixed;
-  min-width: 1100px;
+  min-width: 0;
 }
 
 .deliveries-table th,
@@ -748,4 +755,13 @@ li {
   .tabs {
     overflow-x: auto;
   }
+}
+
+/* Listas largas (remitos): se muestran en una línea y el resto se abre al tocar. */
+td details summary {
+  cursor: pointer;
+}
+
+td details[open] summary {
+  margin-bottom: 4px;
 }
