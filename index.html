@@ -454,6 +454,7 @@
                 <label>Impuesto al cheque, e-cheq (%)<input name="chequePct" type="number" step="0.01" min="0" /></label>
                 <label>Ganancias (%)<input name="gananciasPct" type="number" step="0.1" min="0" /></label>
                 <label>Resultado previo a agosto (lo da el contador)<input name="resultadoPrevio" type="number" step="0.01" /></label>
+                <label>Margen de error del IVA estimado, por mes<input name="ivaBandPorMes" type="number" step="1000" min="0" /></label>
               </form>
               <form id="taxPeriodForm">
                 <h3>Cargar o corregir un impuesto</h3>
@@ -504,6 +505,18 @@
               <p class="legend">Un costo fijo vale como estimación de cada mes desde su fecha de inicio, hasta que cargues el gasto real de esa categoría y mes (el real reemplaza a la estimación). Las tablas de devengado, percibido y reservas que usan esto llegan en el Bloque 2.</p>
             </div>
           </div>
+        </div>
+
+        <div>
+          <h2>Flujo y reservas (desde agosto)</h2>
+          <p class="legend">Dos miradas. <strong>Percibido</strong>: la plata que entró y salió del negocio cada mes, con el IVA adentro porque la caja es la caja; sale solo de lo cargado en la app, no del banco de Pocho. <strong>Devengado</strong>: cuánto se ganó cobres o no, hasta lo que le queda a Pocho. Al final, lo que ya es de ARCA, ARBA y AGIP sigue en el flujo, así que se muestra aparte como reservas, y de ahí sale el disponible real. Los retiros del dueño no son un gasto del negocio: se restan después del flujo. SIRCREB e impuesto al cheque se estiman con los parámetros.</p>
+          <h3>Percibido: plata que entró y salió</h3>
+          <div class="table-wrap"><table><tbody id="flowRows"></tbody></table></div>
+          <h3>Devengado: cuánto se ganó</h3>
+          <div class="table-wrap"><table><tbody id="devRows"></tbody></table></div>
+          <h3>Reservas y disponible real</h3>
+          <div class="table-wrap small"><table><tbody id="reserveRows"></tbody></table></div>
+          <p id="reserveNote" class="legend"></p>
         </div>
 
         <div>

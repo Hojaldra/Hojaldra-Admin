@@ -2,7 +2,7 @@ const IVA_RATE = 0.21;
 const STORAGE_KEY = "hojaldra-admin-v4";
 // Parámetros de impuestos (editables desde Liquidez). Los valores iniciales son
 // aproximaciones nuestras, no del contador: Ganancias 25% se revisa con él.
-const TAX_PARAM_DEFAULTS = { iibbPct: 3.18, gananciasPct: 25, sircrebPct: 2, chequePct: 1.2, cabaCoefPct: 61, resultadoPrevio: 0 };
+const TAX_PARAM_DEFAULTS = { iibbPct: 3.18, gananciasPct: 25, sircrebPct: 2, chequePct: 1.2, cabaCoefPct: 61, resultadoPrevio: 0, ivaBandPorMes: 1000000 };
 
 // --- Backend en Google Sheets / Apps Script ---
 // Pegá acá la URL de tu implementación (termina en /exec). Mientras diga
@@ -1053,6 +1053,7 @@ function render() {
   renderMonthlyTable();
   renderIvaPosition();
   renderTaxBlock();
+  renderFlowBlock();
   renderPagosTab();
   saveState();
 }
@@ -2327,6 +2328,156 @@ addFromForm($("#expenseForm"), "expenses", (v) => {
   };
 });
 
+// ============ Bloque 2: devengado, percibido, reservas y disponible real ============
+// Todo arranca en agosto 2026 (TAX_START_MONTH). El IVA se estima por remitos
+// (como hasta ahora) y se muestra con un margen de error editable por mes.
+
+function monthsFromStart() {
+  const cur = new Date().toISOString().slice(0, 7);
+  const out = [];
+  let m = TAX_START_MONTH;
+  while (m <= cur) { out.push(m); m = shiftMonth(m, 1); }
+  return out;
+}
+
+function taxRecord(tax, ym) {
+  return state.taxPeriods.find((t) => t.tax === tax && t.period === ym);
+}
+
+// Autónomos del mes: lo cargado, o el último valor real anterior como estimación.
+function autonomosFor(ym) {
+  const t = taxRecord("AUTONOMOS", ym);
+  if (t) return Number(t.total || 0);
+  const prev = state.taxPeriods.filter((x) => x.tax === "AUTONOMOS" && x.period < ym).sort((a, b) => b.period.localeCompare(a.period))[0];
+  return prev ? Number(prev.total || 0) : 0;
+}
+
+function iibbDeterminadoFor(ym) {
+  const t = taxRecord("IIBB", ym);
+  return t && t.determinado !== null && t.determinado !== undefined ? Number(t.determinado) : iibbEstimate(ym).determinado;
+}
+
+// IIBB que falta pagar de un mes: 0 si está pagado, el total si está confirmado, la estimación si no.
+function iibbPendienteFor(ym) {
+  const t = taxRecord("IIBB", ym);
+  if (t) return t.status === "pagado" ? 0 : Number(t.total || 0);
+  return iibbEstimate(ym).aPagar;
+}
+
+// Costos del mes (devengado): gastos reales por "mes que corresponde" (sin los
+// retiros del dueño) + costos fijos vigentes de las categorías sin gasto real ese mes.
+function monthCosts(ym) {
+  const real = state.expenses.filter((e) => (e.periodMonth || monthKey(e.date)) === ym && e.category !== "Retiro del dueño");
+  let total = real.reduce((s, e) => s + Number(e.amount), 0);
+  const realCats = new Set(real.map((e) => e.category));
+  const latest = {};
+  state.fixedCosts.filter((c) => c.from <= ym).forEach((c) => {
+    if (!latest[c.category] || c.from >= latest[c.category].from) latest[c.category] = c;
+  });
+  Object.values(latest).forEach((c) => { if (!realCats.has(c.category)) total += Number(c.amount); });
+  return total;
+}
+
+// Lo que ya cobraste de clientes (facturas con número real en estado PAGO) y
+// todavía no le pagaste al proveedor: facturas de proveedor pendientes cuyo
+// cliente ya pagó + costo de remitos cobrados que el proveedor aún no facturó.
+function providerPayable() {
+  const clientPaid = new Set();
+  state.invoices.filter((i) => i.type === "client" && i.status === "PAGO" && isRealInvoice(i))
+    .forEach((i) => (i.deliveryIds || []).forEach((id) => clientPaid.add(id)));
+  const inProviderInvoice = new Set();
+  let pending = 0;
+  state.invoices.filter((i) => i.type === "provider").forEach((i) => {
+    const ids = i.deliveryIds || [];
+    ids.forEach((id) => inProviderInvoice.add(id));
+    if (i.status !== "PAGO" && ids.length && ids.every((id) => clientPaid.has(id))) pending += Number(i.amountGross || 0);
+  });
+  let sinFacturar = 0;
+  state.deliveries.forEach((d) => {
+    if (!clientPaid.has(d.id) || inProviderInvoice.has(d.id)) return;
+    sinFacturar += totalsFor(d).providerNet * (1 + providerIvaRate(d.providerId));
+  });
+  return { pending, sinFacturar, total: pending + sinFacturar };
+}
+
+function flowAgg(ym) {
+  const inM = (d) => d && monthKey(d) === ym;
+  const p = state.taxParams;
+  let ganancia = 0;
+  let ivaDev = 0;
+  state.deliveries.filter((d) => monthKey(d.date) === ym).forEach((d) => {
+    const t = totalsFor(d);
+    ganancia += t.profitNet;
+    ivaDev += t.saleNet * IVA_RATE - t.providerNet * providerIvaRate(d.providerId);
+  });
+  const checks = state.checks.filter((c) => c.status === "ACREDITADO" && inM(checkCashDate(c)));
+  const cobrado = checks.reduce((s, c) => s + Number(c.monto || 0), 0);
+  const cobradoCheque = checks.filter((c) => c.metodo === "CHEQUE").reduce((s, c) => s + Number(c.monto || 0), 0);
+  const prov = (state.directPayments || []).filter((x) => inM(x.fecha)).reduce((s, x) => s + Number(x.monto || 0), 0);
+  const gastos = state.expenses.filter((e) => inM(e.date) && e.category !== "Retiro del dueño").reduce((s, e) => s + Number(e.amount), 0);
+  const retiros = state.expenses.filter((e) => inM(e.date) && e.category === "Retiro del dueño").reduce((s, e) => s + Number(e.amount), 0);
+  const impPagados = state.taxPeriods.filter((t) => t.status === "pagado" && inM(t.payDate)).reduce((s, t) => s + Number(t.total || 0), 0);
+  const ops = state.paymentOrders.filter((op) => isValidISODate(op.date) && monthKey(op.date) === ym);
+  const ivaRet = ops.reduce((s, op) => s + opBreakdown(op).retIva, 0);
+  const ganRet = ops.reduce((s, op) => s + opBreakdown(op).retGanancias, 0);
+  const sircreb = (cobrado * p.sircrebPct) / 100;
+  const cheque = (cobradoCheque * p.chequePct) / 100;
+  const flujo = cobrado - sircreb - cheque - prov - gastos - impPagados;
+  return { ganancia, ivaDev, cobrado, sircreb, cheque, prov, gastos, retiros, impPagados, ivaRet, ganRet, flujo };
+}
+
+function renderFlowBlock() {
+  ensureTaxState();
+  if (!$("#flowRows")) return; // index.html viejo
+  const p = state.taxParams;
+  const months = monthsFromStart();
+  const cur = months[months.length - 1];
+  const ivaRows = typeof ivaPositionRows === "function" ? ivaPositionRows() : [];
+  const lastIva = ivaRows.length ? ivaRows[ivaRows.length - 1] : null;
+
+  let cum = 0, cumResultado = Number(p.resultadoPrevio || 0), cumGanRet = 0, iibbPend = 0, ivaNet = 0, ivaMonths = 0;
+  const flowHtml = [], devHtml = [];
+  months.forEach((ym) => {
+    const a = flowAgg(ym);
+    const costos = monthCosts(ym), aut = autonomosFor(ym), iibb = iibbDeterminadoFor(ym);
+    const resultado = a.ganancia - costos - aut - iibb - a.cheque;
+    const gan = (Math.max(0, resultado) * p.gananciasPct) / 100;
+    cum += a.flujo - a.retiros;
+    cumResultado += resultado;
+    cumGanRet += a.ganRet;
+    iibbPend += iibbPendienteFor(ym);
+    if (lastIva && ym > lastIva.period) { ivaNet += a.ivaDev - a.ivaRet; ivaMonths += 1; }
+    flowHtml.push(`<tr><td>${ym}${ym === cur ? " (en curso)" : ""}</td><td class="num">${money(a.cobrado)}</td><td class="num">${money(a.sircreb)}</td><td class="num">${money(a.cheque)}</td><td class="num">${money(a.prov)}</td><td class="num">${money(a.gastos)}</td><td class="num">${money(a.impPagados)}</td><td class="num"><strong>${money(a.flujo)}</strong></td><td class="num">${money(a.retiros)}</td><td class="num">${money(cum)}</td></tr>`);
+    devHtml.push(`<tr><td>${ym}${ym === cur ? " (en curso)" : ""}</td><td class="num">${money(a.ganancia)}</td><td class="num">${money(costos)}</td><td class="num">${money(aut)}</td><td class="num">${money(iibb)}</td><td class="num">${money(a.cheque)}</td><td class="num">${money(resultado)}</td><td class="num">${money(gan)}</td><td class="num"><strong>${money(resultado - gan)}</strong></td></tr>`);
+  });
+
+  $("#flowRows").innerHTML = `<tr><th>Mes</th><th class="num">Cobrado</th><th class="num">− SIRCREB (est.)</th><th class="num">− Imp. cheque (est.)</th><th class="num">− Pagado a prov.</th><th class="num">− Gastos</th><th class="num">− Impuestos pagados</th><th class="num">Flujo neto</th><th class="num">Retiros del dueño</th><th class="num">Acumulado desde agosto</th></tr>${flowHtml.join("")}`;
+  $("#devRows").innerHTML = `<tr><th>Mes</th><th class="num">Ganancia (remitos)</th><th class="num">− Gastos y costos fijos</th><th class="num">− Autónomos</th><th class="num">− IIBB</th><th class="num">− Imp. cheque</th><th class="num">Resultado antes de Ganancias</th><th class="num">− Ganancias (est.)</th><th class="num">Le queda a Pocho</th></tr>${devHtml.join("")}`;
+
+  const band = Number(p.ivaBandPorMes || 0);
+  const ivaKnown = Boolean(lastIva);
+  const ivaRes = ivaKnown ? Math.max(0, ivaNet - Math.max(0, lastIva.pasa)) : 0;
+  const ivaBand = band * ivaMonths;
+  const ganRes = Math.max(0, (Math.max(0, cumResultado) * p.gananciasPct) / 100 - cumGanRet);
+  const autRec = taxRecord("AUTONOMOS", cur);
+  const autPend = autRec && autRec.status === "pagado" ? 0 : autonomosFor(cur);
+  const prov = providerPayable();
+  const reservas = ivaRes + iibbPend + autPend + ganRes + prov.total;
+  const disponible = cum - reservas;
+  $("#reserveRows").innerHTML = `
+    <tr><td>IVA a reservar${ivaKnown ? ` (desde ${escapeHtml(shiftMonth(lastIva.period, 1))})` : ""}</td><td class="num">${ivaKnown ? `≈ ${money(ivaRes)} <span class="legend">(± ${money(ivaBand)})</span>` : "Cargá las DDJJ de IVA"}</td></tr>
+    <tr><td>A pagar a proveedores (el cliente ya pagó)</td><td class="num">≈ ${money(prov.total)}</td></tr>
+    <tr><td>IIBB pendiente de pago</td><td class="num">≈ ${money(iibbPend)}</td></tr>
+    <tr><td>Autónomos del mes en curso</td><td class="num">${money(autPend)}</td></tr>
+    <tr><td>Ganancias a juntar (acumulado − retenciones sufridas)</td><td class="num">≈ ${money(ganRes)}</td></tr>
+    <tr class="totals-row"><th>Total reservas</th><th class="num">${money(reservas)}</th></tr>
+    <tr><td>Flujo acumulado desde agosto (después de retiros)</td><td class="num">${money(cum)}</td></tr>
+    <tr class="totals-row"><th>Disponible real${ivaKnown ? "" : " (sin IVA)"}</th><th class="num">${money(disponible)}</th></tr>`;
+  $("#reserveNote").innerHTML = ivaKnown
+    ? `IVA: se estima por remitos desde la última DDJJ cargada (${escapeHtml(lastIva.period)}), descontando las retenciones de IVA de las OPs y el saldo a favor que pasaba (${money(Math.max(0, lastIva.pasa))}). El margen de ± ${money(band)} por mes es lo que se desvió el estimado contra las DDJJ de agosto y septiembre. Cuando cargues la DDJJ real de un mes, reemplaza a la estimación.`
+    : "Todavía no hay DDJJ de IVA cargadas en el panel de IVA, así que no puedo estimar cuánto reservar. Cargá agosto y septiembre y aparece solo.";
+}
+
 // ===================== Esquema de impuestos (Bloque 1) =====================
 // Cada impuesto pasa por tres estados: estimado (lo calcula la app) ->
 // confirmado (número real de la DDJJ/VEP) -> pagado (con fecha de pago).
@@ -2367,9 +2518,14 @@ function iibbEstimate(ym) {
   const cobros = state.checks
     .filter((c) => c.status === "ACREDITADO" && c.fechaPago && monthKey(c.fechaPago) === ym)
     .reduce((s, c) => s + (c.monto || 0), 0);
+  // Créditos: SIRCREB estimado + IIBB que retuvieron los clientes (OPs del mes).
+  const retIIBB = state.paymentOrders
+    .filter((op) => isValidISODate(op.date) && monthKey(op.date) === ym)
+    .reduce((s, op) => s + opBreakdown(op).retIIBB, 0);
   const determinado = (ventas * p.iibbPct) / 100;
   const sircreb = (cobros * p.sircrebPct) / 100;
-  return { ventas, cobros, determinado, sircreb, aPagar: Math.max(0, determinado - sircreb) };
+  const creditos = sircreb + retIIBB;
+  return { ventas, cobros, determinado, sircreb, retIIBB, creditos, aPagar: Math.max(0, determinado - creditos) };
 }
 
 function taxMonths() {
@@ -2396,12 +2552,12 @@ function renderTaxBlock() {
     ? `<button type="button" data-edit-taxperiod="${t.id}">Editar</button> <button type="button" data-delete-taxperiod="${t.id}">Borrar</button>`
     : `<button type="button" data-new-taxperiod="${tax}|${ym}">Cargar real</button>`;
 
-  $("#iibbRows").innerHTML = `<tr><th>Período</th><th class="num">Determinado</th><th class="num">Créditos (SIRCREB)</th><th class="num">A pagar</th><th>Estado</th><th>CABA / Prov.</th><th>Pago</th><th></th></tr>`
+  $("#iibbRows").innerHTML = `<tr><th>Período</th><th class="num">Determinado</th><th class="num">Créditos (SIRCREB + retenciones)</th><th class="num">A pagar</th><th>Estado</th><th>CABA / Prov.</th><th>Pago</th><th></th></tr>`
     + months.map((ym) => {
       const t = find("IIBB", ym);
       const e = iibbEstimate(ym);
       const split = t && (t.caba != null || t.prov != null) ? `${money(t.caba || 0)} / ${money(t.prov || 0)}` : "—";
-      return `<tr><td>${ym}</td><td class="num">${cell(t ? t.determinado : null, e.determinado)}</td><td class="num">${cell(t ? t.creditos : null, e.sircreb)}</td><td class="num">${cell(t ? t.total : null, e.aPagar)}</td><td>${status(t)}</td><td>${split}</td><td>${t && t.payDate ? fmtDDMMYY(t.payDate) : ""}</td><td>${actions("IIBB", ym, t)}</td></tr>`;
+      return `<tr><td>${ym}</td><td class="num">${cell(t ? t.determinado : null, e.determinado)}</td><td class="num">${cell(t ? t.creditos : null, e.creditos)}</td><td class="num">${cell(t ? t.total : null, e.aPagar)}</td><td>${status(t)}</td><td>${split}</td><td>${t && t.payDate ? fmtDDMMYY(t.payDate) : ""}</td><td>${actions("IIBB", ym, t)}</td></tr>`;
     }).join("");
 
   const aut = state.taxPeriods.filter((t) => t.tax === "AUTONOMOS");
