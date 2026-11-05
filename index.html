@@ -419,21 +419,90 @@
             <label>Fecha<input name="date" type="date" required /></label>
             <label>Categoría
               <select name="category">
-                <option>Sueldo Admin</option>
+                <option>Honorarios administración</option>
                 <option>Retiro del dueño</option>
+                <option>Combustible y peajes</option>
+                <option>Contador</option>
                 <option>Flete</option>
                 <option>Viáticos</option>
                 <option>Gastos Generales</option>
                 <option>Otros</option>
               </select>
             </label>
+            <label>Mes que corresponde<input name="periodMonth" type="month" /></label>
             <label>Descripción<input name="description" /></label>
             <label>Monto<input name="amount" type="number" min="0" step="0.01" required /></label>
             <button type="submit">Agregar gasto</button>
           </form>
           <div>
             <h2>Gastos cargados</h2>
+            <button type="button" id="migrateExpensesBtn">Pasar gastos viejos al esquema nuevo</button>
             <div class="table-wrap small"><table><tbody id="expenseRows"></tbody></table></div>
+          </div>
+        </div>
+
+        <div>
+          <h2>Impuestos y costos fijos</h2>
+          <p class="legend">Cada impuesto pasa por tres estados: <strong>estimado</strong> (lo calcula la app con los parámetros de la izquierda), <strong>confirmado</strong> (el número real de la DDJJ o del VEP) y <strong>pagado</strong> (con fecha de pago). Las estimaciones usan solo facturas con número real: las que dicen "n/a" no son comprobantes de ARCA y no entran. El IIBB se estima en total; el desglose CABA/Provincia entra cuando cargás el CM03 real.</p>
+          <div class="catalog-grid" style="grid-template-columns: minmax(260px, 1fr) 3fr;">
+            <div>
+              <form id="taxParamsForm">
+                <h3>Parámetros</h3>
+                <label>IIBB sobre ventas netas (%)<input name="iibbPct" type="number" step="0.001" min="0" /></label>
+                <label>Coeficiente CABA (%)<input name="cabaCoefPct" type="number" step="0.1" min="0" max="100" /></label>
+                <label>SIRCREB sobre cobros (%)<input name="sircrebPct" type="number" step="0.01" min="0" /></label>
+                <label>Impuesto al cheque, e-cheq (%)<input name="chequePct" type="number" step="0.01" min="0" /></label>
+                <label>Ganancias (%)<input name="gananciasPct" type="number" step="0.1" min="0" /></label>
+                <label>Resultado previo a agosto (lo da el contador)<input name="resultadoPrevio" type="number" step="0.01" /></label>
+              </form>
+              <form id="taxPeriodForm">
+                <h3>Cargar o corregir un impuesto</h3>
+                <label>Impuesto
+                  <select name="tax">
+                    <option value="IIBB">IIBB</option>
+                    <option value="AUTONOMOS">Autónomos</option>
+                  </select>
+                </label>
+                <label>Período que corresponde<input name="period" type="month" required /></label>
+                <label>Estado
+                  <select name="status">
+                    <option value="confirmado">Confirmado</option>
+                    <option value="pagado">Pagado</option>
+                  </select>
+                </label>
+                <label>Total a pagar (con intereses)<input name="total" type="number" step="0.01" min="0" required /></label>
+                <label>IIBB: impuesto determinado (CM03)<input name="determinado" type="number" step="0.01" min="0" /></label>
+                <label>IIBB: créditos, SIRCREB y retenciones (CM03)<input name="creditos" type="number" step="0.01" min="0" /></label>
+                <label>IIBB: a pagar CABA<input name="caba" type="number" step="0.01" min="0" /></label>
+                <label>IIBB: a pagar Provincia<input name="prov" type="number" step="0.01" min="0" /></label>
+                <label>Fecha de pago<input name="payDate" type="date" /></label>
+                <button type="submit">Guardar</button>
+              </form>
+              <form id="fixedCostForm">
+                <h3>Costo fijo estimado</h3>
+                <label>Categoría
+                  <select name="category">
+                    <option>Honorarios administración</option>
+                    <option>Combustible y peajes</option>
+                    <option>Contador</option>
+                    <option>Otros</option>
+                  </select>
+                </label>
+                <label>Concepto<input name="label" /></label>
+                <label>Monto por mes<input name="amount" type="number" min="0" step="0.01" required /></label>
+                <label>Rige desde<input name="from" type="month" required /></label>
+                <button type="submit">Agregar costo fijo</button>
+              </form>
+            </div>
+            <div>
+              <h3>IIBB por período</h3>
+              <div class="table-wrap small"><table><tbody id="iibbRows"></tbody></table></div>
+              <h3>Autónomos por período</h3>
+              <div class="table-wrap small"><table><tbody id="autRows"></tbody></table></div>
+              <h3>Costos fijos cargados</h3>
+              <div class="table-wrap small"><table><tbody id="fixedCostRows"></tbody></table></div>
+              <p class="legend">Un costo fijo vale como estimación de cada mes desde su fecha de inicio, hasta que cargues el gasto real de esa categoría y mes (el real reemplaza a la estimación). Las tablas de devengado, percibido y reservas que usan esto llegan en el Bloque 2.</p>
+            </div>
           </div>
         </div>
 

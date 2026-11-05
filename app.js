@@ -1,5 +1,8 @@
 const IVA_RATE = 0.21;
 const STORAGE_KEY = "hojaldra-admin-v4";
+// Parámetros de impuestos (editables desde Liquidez). Los valores iniciales son
+// aproximaciones nuestras, no del contador: Ganancias 25% se revisa con él.
+const TAX_PARAM_DEFAULTS = { iibbPct: 3.18, gananciasPct: 25, sircrebPct: 2, chequePct: 1.2, cabaCoefPct: 61, resultadoPrevio: 0 };
 
 // --- Backend en Google Sheets / Apps Script ---
 // Pegá acá la URL de tu implementación (termina en /exec). Mientras diga
@@ -116,6 +119,11 @@ const seed = {
   // retenciones, usos, saldoPrevio|null, saldoDDJJ|null }. Con eso el panel
   // "Posición de IVA" arrastra el saldo a favor mes a mes igual que ARCA.
   ivaPeriods: [],
+  // Esquema de impuestos: parámetros editables, costos fijos estimados con
+  // "rige desde" y registros de IIBB/autónomos (confirmado | pagado).
+  taxParams: { ...TAX_PARAM_DEFAULTS },
+  fixedCosts: [],
+  taxPeriods: [],
   openingBalance: 0
 };
 
@@ -465,7 +473,10 @@ function hydrate(saved) {
     paymentOrders: saved.paymentOrders || [],
     checks: saved.checks || [],
     directPayments: saved.directPayments || [],
-    ivaPeriods: saved.ivaPeriods || []
+    ivaPeriods: saved.ivaPeriods || [],
+    taxParams: { ...TAX_PARAM_DEFAULTS, ...(saved.taxParams || {}) },
+    fixedCosts: saved.fixedCosts || [],
+    taxPeriods: saved.taxPeriods || []
   };
   merged.priceRules = (merged.priceRules || []).map(migrateRuleToCommission);
   merged.checks = (merged.checks || []).map(migrateCheckAllocations);
@@ -1041,6 +1052,7 @@ function render() {
   renderExpenses();
   renderMonthlyTable();
   renderIvaPosition();
+  renderTaxBlock();
   renderPagosTab();
   saveState();
 }
@@ -2287,9 +2299,10 @@ document.body.addEventListener("click", (event) => {
 
 function renderExpenses() {
   const rows = [...state.expenses].sort((a, b) => b.date.localeCompare(a.date));
-  $("#expenseRows").innerHTML = rows.length ? `<tr><th>Fecha</th><th>Categoría</th><th>Descripción</th><th class="num">Monto</th><th></th></tr>
+  $("#expenseRows").innerHTML = rows.length ? `<tr><th>Fecha</th><th>Mes</th><th>Categoría</th><th>Descripción</th><th class="num">Monto</th><th></th></tr>
     ${rows.map((item) => `<tr>
       <td>${fmtDDMMYY(item.date)}</td>
+      <td>${escapeHtml(item.periodMonth || monthKey(item.date))}</td>
       <td>${escapeHtml(item.category)}</td>
       <td>${escapeHtml(item.description)}</td>
       <td class="num">${money(item.amount)}</td>
@@ -2298,13 +2311,244 @@ function renderExpenses() {
     : `<tr><td class="empty">Sin gastos cargados.</td></tr>`;
 }
 
-addFromForm($("#expenseForm"), "expenses", (v) => ({
-  id: cryptoId(),
-  date: v.date,
-  category: v.category,
-  description: v.description,
-  amount: Number(v.amount)
-}));
+addFromForm($("#expenseForm"), "expenses", (v) => {
+  // después del reset del formulario, vuelve a prellenar el "mes que corresponde"
+  setTimeout(() => {
+    const f = $("#expenseForm");
+    if (f && f.elements.periodMonth) { delete f.elements.periodMonth.dataset.touched; prefillExpenseMonth(); }
+  }, 0);
+  return {
+    id: cryptoId(),
+    date: v.date,
+    periodMonth: v.periodMonth || monthKey(v.date),
+    category: v.category,
+    description: v.description,
+    amount: Number(v.amount)
+  };
+});
+
+// ===================== Esquema de impuestos (Bloque 1) =====================
+// Cada impuesto pasa por tres estados: estimado (lo calcula la app) ->
+// confirmado (número real de la DDJJ/VEP) -> pagado (con fecha de pago).
+// Los registros guardados (state.taxPeriods) son confirmado o pagado; el
+// "estimado" se calcula al vuelo. Las estimaciones usan solo facturas con
+// número real: las "n/a" no son comprobantes de ARCA.
+const TAX_START_MONTH = "2026-08"; // los números arrancan en agosto 2026
+
+function ensureTaxState() {
+  state.taxParams = { ...TAX_PARAM_DEFAULTS, ...(state.taxParams || {}) };
+  if (!Array.isArray(state.fixedCosts)) state.fixedCosts = [];
+  if (!Array.isArray(state.taxPeriods)) state.taxPeriods = [];
+}
+
+function shiftMonth(ym, delta) {
+  const [y, m] = ym.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function isRealInvoice(invoice) {
+  const n = String(invoice.number || "").trim();
+  return n !== "" && !/^n\/?a\d*$/i.test(n);
+}
+
+function taxNum(x) {
+  return x === "" || x === null || x === undefined ? null : Number(x);
+}
+
+// IIBB estimado de un mes: % sobre ventas netas facturadas (por fecha de
+// factura) menos SIRCREB (% sobre lo acreditado en el mes).
+function iibbEstimate(ym) {
+  ensureTaxState();
+  const p = state.taxParams;
+  const ventas = state.invoices
+    .filter((i) => i.type === "client" && isRealInvoice(i) && monthKey(i.issueDate || "") === ym)
+    .reduce((s, i) => s + i.amountGross / (1 + IVA_RATE), 0);
+  const cobros = state.checks
+    .filter((c) => c.status === "ACREDITADO" && c.fechaPago && monthKey(c.fechaPago) === ym)
+    .reduce((s, c) => s + (c.monto || 0), 0);
+  const determinado = (ventas * p.iibbPct) / 100;
+  const sircreb = (cobros * p.sircrebPct) / 100;
+  return { ventas, cobros, determinado, sircreb, aPagar: Math.max(0, determinado - sircreb) };
+}
+
+function taxMonths() {
+  ensureTaxState();
+  const cur = new Date().toISOString().slice(0, 7);
+  const set = new Set(state.taxPeriods.map((t) => t.period));
+  let m = TAX_START_MONTH;
+  while (m <= cur) { set.add(m); m = shiftMonth(m, 1); }
+  return [...set].sort();
+}
+
+function renderTaxBlock() {
+  ensureTaxState();
+  if (!$("#iibbRows")) return; // index.html viejo
+  const p = state.taxParams;
+  document.querySelectorAll("#taxParamsForm [name]").forEach((el) => {
+    if (document.activeElement !== el) el.value = p[el.name];
+  });
+  const months = taxMonths().reverse();
+  const find = (tax, ym) => state.taxPeriods.find((t) => t.tax === tax && t.period === ym);
+  const cell = (real, est) => (real !== null && real !== undefined ? money(real) : `≈ ${money(est)}`);
+  const status = (t) => (t ? (t.status === "pagado" ? "Pagado" : "Confirmado") : "Estimado");
+  const actions = (tax, ym, t) => t
+    ? `<button type="button" data-edit-taxperiod="${t.id}">Editar</button> <button type="button" data-delete-taxperiod="${t.id}">Borrar</button>`
+    : `<button type="button" data-new-taxperiod="${tax}|${ym}">Cargar real</button>`;
+
+  $("#iibbRows").innerHTML = `<tr><th>Período</th><th class="num">Determinado</th><th class="num">Créditos (SIRCREB)</th><th class="num">A pagar</th><th>Estado</th><th>CABA / Prov.</th><th>Pago</th><th></th></tr>`
+    + months.map((ym) => {
+      const t = find("IIBB", ym);
+      const e = iibbEstimate(ym);
+      const split = t && (t.caba != null || t.prov != null) ? `${money(t.caba || 0)} / ${money(t.prov || 0)}` : "—";
+      return `<tr><td>${ym}</td><td class="num">${cell(t ? t.determinado : null, e.determinado)}</td><td class="num">${cell(t ? t.creditos : null, e.sircreb)}</td><td class="num">${cell(t ? t.total : null, e.aPagar)}</td><td>${status(t)}</td><td>${split}</td><td>${t && t.payDate ? fmtDDMMYY(t.payDate) : ""}</td><td>${actions("IIBB", ym, t)}</td></tr>`;
+    }).join("");
+
+  const aut = state.taxPeriods.filter((t) => t.tax === "AUTONOMOS");
+  $("#autRows").innerHTML = `<tr><th>Período</th><th class="num">Monto</th><th>Estado</th><th>Pago</th><th></th></tr>`
+    + months.map((ym) => {
+      const t = find("AUTONOMOS", ym);
+      const prev = aut.filter((x) => x.period < ym).sort((a, b) => b.period.localeCompare(a.period))[0];
+      const monto = t ? money(t.total) : (prev ? `≈ ${money(prev.total)}` : "—");
+      return `<tr><td>${ym}</td><td class="num">${monto}</td><td>${status(t)}</td><td>${t && t.payDate ? fmtDDMMYY(t.payDate) : ""}</td><td>${actions("AUTONOMOS", ym, t)}</td></tr>`;
+    }).join("");
+
+  const fc = [...state.fixedCosts].sort((a, b) => a.category.localeCompare(b.category) || a.from.localeCompare(b.from));
+  $("#fixedCostRows").innerHTML = fc.length
+    ? `<tr><th>Categoría</th><th>Concepto</th><th>Desde</th><th class="num">Monto/mes</th><th></th></tr>`
+      + fc.map((c) => `<tr><td>${escapeHtml(c.category)}</td><td>${escapeHtml(c.label || "")}</td><td>${c.from}</td><td class="num">${money(c.amount)}</td><td><button type="button" data-delete-fixedcost="${c.id}">Borrar</button></td></tr>`).join("")
+    : `<tr><td class="empty">Sin costos fijos cargados.</td></tr>`;
+}
+
+// "Mes que corresponde" de un gasto: por defecto el mes de la fecha; los
+// honorarios se pagan a mes vencido, así que se prellenan con el mes anterior.
+function prefillExpenseMonth() {
+  const f = $("#expenseForm");
+  if (!f || !f.elements.periodMonth || f.elements.periodMonth.dataset.touched) return;
+  const date = f.elements.date.value;
+  if (!date) return;
+  let ym = monthKey(date);
+  if (f.elements.category.value === "Honorarios administración") ym = shiftMonth(ym, -1);
+  f.elements.periodMonth.value = ym;
+}
+
+(function wireExpenseMonth() {
+  const f = $("#expenseForm");
+  if (!f || !f.elements.periodMonth) return;
+  ["date", "category"].forEach((name) => f.elements[name].addEventListener("change", prefillExpenseMonth));
+  f.elements.periodMonth.addEventListener("input", (e) => { e.target.dataset.touched = "1"; });
+})();
+
+// Pasa los gastos viejos al esquema nuevo (con confirmación y vista previa).
+function migrateOldExpenses() {
+  ensureTaxState();
+  const exists = (tax, period) => state.taxPeriods.some((t) => t.tax === tax && t.period === period);
+  const plan = { honorarios: [], toTax: [], monthFix: [] };
+  state.expenses.forEach((e) => {
+    const desc = String(e.description || "");
+    const ym = monthKey(e.date);
+    let tax = null;
+    let period = null;
+    if (e.category === "Otros" && /iibb|ingresos brutos/i.test(desc)) { tax = "IIBB"; period = shiftMonth(ym, -1); }
+    else if (e.category === "Otros" && /aut[oó]nomo/i.test(desc)) { tax = "AUTONOMOS"; period = ym; }
+    if (tax && !exists(tax, period)) plan.toTax.push({ e, tax, period });
+    else if (e.category === "Sueldo Admin") plan.honorarios.push(e);
+    else if (!e.periodMonth) plan.monthFix.push(e);
+  });
+  if (!plan.toTax.length && !plan.honorarios.length && !plan.monthFix.length) {
+    alert("No hay gastos viejos para pasar.");
+    return;
+  }
+  const lines = [
+    `Honorarios (antes "Sueldo Admin"): ${plan.honorarios.length}, con el mes anterior como "mes que corresponde".`,
+    ...plan.toTax.map((x) => `${x.tax} ${x.period}: ${money(x.e.amount)} (pagado ${x.e.date}) pasa a Impuestos y sale de Gastos.`),
+    `Otros gastos: ${plan.monthFix.length}, con el mes de la fecha.`
+  ];
+  if (!confirm(`Esto va a hacer:\n\n${lines.join("\n")}\n\n¿Seguimos?`)) return;
+  plan.honorarios.forEach((e) => {
+    e.category = "Honorarios administración";
+    if (!e.periodMonth) e.periodMonth = shiftMonth(monthKey(e.date), -1);
+  });
+  plan.monthFix.forEach((e) => { e.periodMonth = monthKey(e.date); });
+  plan.toTax.forEach((x) => {
+    state.taxPeriods.push({ id: cryptoId(), tax: x.tax, period: x.period, status: "pagado", total: x.e.amount, determinado: null, creditos: null, caba: null, prov: null, payDate: x.e.date });
+  });
+  const gone = new Set(plan.toTax.map((x) => x.e.id));
+  state.expenses = state.expenses.filter((e) => !gone.has(e.id));
+  render();
+}
+
+if ($("#taxParamsForm")) {
+  $("#taxParamsForm").addEventListener("submit", (e) => e.preventDefault());
+  $("#taxParamsForm").addEventListener("change", (e) => {
+    const el = e.target;
+    if (!el.name) return;
+    ensureTaxState();
+    const v = Number(el.value);
+    if (el.value === "" || !Number.isFinite(v) || (v < 0 && el.name !== "resultadoPrevio")) {
+      alert("Valor inválido.");
+      render();
+      return;
+    }
+    state.taxParams[el.name] = v;
+    render();
+  });
+}
+
+if ($("#taxPeriodForm")) {
+  $("#taxPeriodForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    ensureTaxState();
+    const v = formValues(event.target);
+    if (v.status === "pagado" && !v.payDate) {
+      alert("Para marcarlo como pagado cargá la fecha de pago.");
+      return;
+    }
+    const item = { id: cryptoId(), tax: v.tax, period: v.period, status: v.status, total: taxNum(v.total), determinado: taxNum(v.determinado), creditos: taxNum(v.creditos), caba: taxNum(v.caba), prov: taxNum(v.prov), payDate: v.payDate || "" };
+    const idx = state.taxPeriods.findIndex((t) => t.tax === item.tax && t.period === item.period);
+    if (idx >= 0) { item.id = state.taxPeriods[idx].id; state.taxPeriods[idx] = item; } else state.taxPeriods.push(item);
+    event.target.reset();
+    render();
+  });
+}
+
+if ($("#fixedCostForm")) {
+  addFromForm($("#fixedCostForm"), "fixedCosts", (v) => ({ id: cryptoId(), category: v.category, label: v.label, amount: Number(v.amount), from: v.from }));
+}
+
+document.body.addEventListener("click", (event) => {
+  const d = event.target.dataset || {};
+  const form = $("#taxPeriodForm");
+  const set = (name, value) => { if (form && form.elements[name]) form.elements[name].value = value === null || value === undefined ? "" : value; };
+  if (event.target.id === "migrateExpensesBtn") migrateOldExpenses();
+  if (d.deleteTaxperiod) {
+    ensureTaxState();
+    const t = state.taxPeriods.find((x) => x.id === d.deleteTaxperiod);
+    if (t && confirm(`¿Borrar ${t.tax} ${t.period}?`)) {
+      state.taxPeriods = state.taxPeriods.filter((x) => x.id !== t.id);
+      render();
+    }
+  }
+  if (d.editTaxperiod && form) {
+    const t = state.taxPeriods.find((x) => x.id === d.editTaxperiod);
+    if (t) {
+      ["tax", "period", "status", "total", "determinado", "creditos", "caba", "prov", "payDate"].forEach((k) => set(k, t[k]));
+      form.scrollIntoView({ behavior: "smooth" });
+    }
+  }
+  if (d.newTaxperiod && form) {
+    const [tax, ym] = d.newTaxperiod.split("|");
+    form.reset();
+    set("tax", tax);
+    set("period", ym);
+    form.scrollIntoView({ behavior: "smooth" });
+  }
+  if (d.deleteFixedcost) {
+    ensureTaxState();
+    state.fixedCosts = state.fixedCosts.filter((x) => x.id !== d.deleteFixedcost);
+    render();
+  }
+});
 
 // (el if protege por si app.js se actualiza sin el index.html nuevo)
 if ($("#ivaPeriodForm")) {
@@ -3874,6 +4118,18 @@ function mergeState(imported) {
       state.ivaPeriods.push(p);
       existingIvaPeriods.add(p.period);
     }
+  });
+
+  // Esquema de impuestos: costos fijos por id, registros de impuestos por impuesto+período.
+  ensureTaxState();
+  const fcIds = new Set(state.fixedCosts.map((c) => c.id));
+  (imported.fixedCosts || []).forEach((c) => {
+    if (!fcIds.has(c.id)) { state.fixedCosts.push(c); fcIds.add(c.id); }
+  });
+  const tpKeys = new Set(state.taxPeriods.map((t) => `${t.tax}|${t.period}`));
+  (imported.taxPeriods || []).forEach((t) => {
+    const k = `${t.tax}|${t.period}`;
+    if (!tpKeys.has(k)) { state.taxPeriods.push(t); tpKeys.add(k); }
   });
 
   return summary;
