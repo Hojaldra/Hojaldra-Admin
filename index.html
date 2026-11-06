@@ -442,6 +442,20 @@
         </div>
 
         <div>
+          <h2>Resumen: cuánto guardar y cuánto te queda</h2>
+          <p class="legend">Es lo primero para mirar cada semana. Todo sale de lo que ya cargaste; los importes son estimaciones hasta que el contador confirme. El "puede llegar a" del IVA suma el margen de error de los parámetros.</p>
+          <div class="summary-cards" id="summaryCards"></div>
+          <h3>Para guardar, uno por uno</h3>
+          <div class="table-wrap small"><table><tbody id="summaryReserveRows"></tbody></table></div>
+          <h3>Mes a mes (meses cerrados)</h3>
+          <div class="table-wrap small"><table><tbody id="summaryMonthRows"></tbody></table></div>
+          <div>
+            <button type="button" id="printSummaryBtn">Imprimir resumen para Pocho</button>
+            <span class="legend">Se abre el cuadro de impresión: elegí "Guardar como PDF" para mandárselo.</span>
+          </div>
+        </div>
+
+        <div>
           <h2>Impuestos y costos fijos</h2>
           <p class="legend">Cada impuesto pasa por tres estados: <strong>estimado</strong> (lo calcula la app con los parámetros de la izquierda), <strong>confirmado</strong> (el número real de la DDJJ o del VEP) y <strong>pagado</strong> (con fecha de pago). Las estimaciones usan solo facturas con número real: las que dicen "n/a" no son comprobantes de ARCA y no entran. El IIBB se estima en total; el desglose CABA/Provincia entra cuando cargás el CM03 real.</p>
           <div class="catalog-grid" style="grid-template-columns: minmax(260px, 1fr) 3fr;">
@@ -456,6 +470,8 @@
                 <label>Resultado previo a agosto (lo da el contador)<input name="resultadoPrevio" type="number" step="0.01" /></label>
                 <label>Margen de error del IVA estimado, por mes<input name="ivaBandPorMes" type="number" step="1000" min="0" /></label>
                 <label>Honorarios mensuales estimados<input name="honorariosMensual" type="number" step="1000" min="0" /></label>
+                <label>Día de vencimiento del IVA (0 = sin definir)<input name="ivaDiaVence" type="number" step="1" min="0" max="31" /></label>
+                <label>Día de vencimiento del IIBB (0 = sin definir)<input name="iibbDiaVence" type="number" step="1" min="0" max="31" /></label>
               </form>
               <form id="taxPeriodForm">
                 <h3>Cargar o corregir un impuesto</h3>
@@ -493,23 +509,23 @@
 
         <div>
           <h2>Flujo y reservas (desde agosto)</h2>
-          <p class="legend">Dos miradas. <strong>Percibido</strong>: la plata que entró y salió del negocio cada mes, con el IVA adentro porque la caja es la caja; sale solo de lo cargado en la app, no del banco de Pocho. <strong>Devengado</strong>: cuánto se ganó cobres o no, hasta lo que le queda a Pocho. Al final, lo que ya es de ARCA, ARBA y AGIP sigue en el flujo, así que se muestra aparte como reservas, y de ahí sale el disponible real. Los retiros del dueño no son un gasto del negocio: se restan después del flujo. SIRCREB e impuesto al cheque se estiman con los parámetros.</p>
+          <p class="legend">Dos miradas. <strong>Percibido</strong>: la plata que entró y salió del negocio cada mes, con el IVA adentro porque la caja es la caja; sale de lo cargado en la app, no del banco de Pocho. <strong>Devengado</strong>: cuánto se ganó por lo entregado, cobres o no, hasta lo que le queda a Hojaldra. Más abajo, lo que hay que guardar para los impuestos y proveedores que vienen, separado por mes de pago.</p>
           <h3>Percibido: plata que entró y salió</h3>
           <div class="table-wrap"><table><tbody id="flowRows"></tbody></table></div>
           <h3>Devengado: cuánto se ganó</h3>
           <div class="table-wrap"><table><tbody id="devRows"></tbody></table></div>
-          <h3>Reservas y disponible real</h3>
+          <h3>Para guardar</h3>
           <div class="table-wrap small"><table><tbody id="reserveRows"></tbody></table></div>
           <p id="reserveNote" class="legend"></p>
         </div>
 
         <div>
-          <h2>Resumen mensual: devengado vs. caja real</h2>
-          <p class="legend">Ojo con la última columna: es el IVA de cada mes por separado, sin descontar el saldo a favor de ARCA. Lo que realmente hay que reservar está en "Reservas y disponible real", más arriba. <strong>Devengado</strong> = lo que ganaste según los remitos entregados ese mes, los hayas cobrado o no. Sirve para saber si el negocio es rentable. <strong>Caja real</strong> = solo la plata que efectivamente entró o salió del banco (facturas ya marcadas PAGO, neto de retenciones). Sirve para saber si tenés efectivo disponible. Los dos números casi nunca coinciden, y está bien que así sea — la diferencia es justamente lo que todavía tenés pendiente de cobrar o pagar.</p>
-          <label style="max-width:260px">Saldo inicial de caja (opcional)
-            <input id="openingBalance" type="number" step="0.01" placeholder="cuánto había en el banco al empezar" />
-          </label>
-          <div class="table-wrap"><table id="monthlyTable"><tbody id="monthlyRows"></tbody></table></div>
+          <h2>Ganado vs. cobrado, mes a mes</h2>
+          <p class="legend">Compara lo que ganaste por lo entregado en el mes (devengado) con la plata que efectivamente entró menos lo que pagaste a proveedores (percibido). Los dos van sin IVA para que sean comparables; el cobrado y el pagado se muestran con IVA, como pasan por la caja. La diferencia es plata ganada que todavía no cobraste (o que no pasa por tu caja), y el acumulado te dice cuánto va quedando afuera.</p>
+          <div class="table-wrap"><table><tbody id="compareRows"></tbody></table></div>
+          <h3>Retenciones que te hicieron</h3>
+          <p class="legend">Son pagos a cuenta de impuestos: ya están descontados en lo cobrado.</p>
+          <div class="table-wrap small"><table><tbody id="retRows"></tbody></table></div>
         </div>
 
         <div>
@@ -539,6 +555,8 @@
     <template id="emptyRow">
       <tr><td colspan="12" class="empty">Sin datos para el filtro actual.</td></tr>
     </template>
+
+    <div id="printSheet" class="print-only"></div>
 
     <script src="./app.js"></script>
   </body>

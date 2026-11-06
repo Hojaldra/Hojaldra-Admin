@@ -2,7 +2,7 @@ const IVA_RATE = 0.21;
 const STORAGE_KEY = "hojaldra-admin-v4";
 // Parámetros de impuestos (editables desde Liquidez). Los valores iniciales son
 // aproximaciones nuestras, no del contador: Ganancias 25% se revisa con él.
-const TAX_PARAM_DEFAULTS = { iibbPct: 3.18, gananciasPct: 25, sircrebPct: 2, chequePct: 1.2, cabaCoefPct: 61, resultadoPrevio: 0, ivaBandPorMes: 1000000, honorariosMensual: 2000000 };
+const TAX_PARAM_DEFAULTS = { iibbPct: 3.18, gananciasPct: 25, sircrebPct: 2, chequePct: 1.2, cabaCoefPct: 61, resultadoPrevio: 0, ivaBandPorMes: 1000000, honorariosMensual: 2000000, ivaDiaVence: 0, iibbDiaVence: 0 };
 
 // --- Backend en Google Sheets / Apps Script ---
 // Pegá acá la URL de tu implementación (termina en /exec). Mientras diga
@@ -1050,10 +1050,11 @@ function render() {
   renderBalancePanel();
   renderProviderControlPanel();
   renderExpenses();
-  renderMonthlyTable();
+  renderCompareTable();
   renderIvaPosition();
   renderTaxBlock();
   renderFlowBlock();
+  renderSummary();
   renderPagosTab();
   saveState();
 }
@@ -2430,10 +2431,50 @@ function flowAgg(ym) {
   const ops = state.paymentOrders.filter((op) => isValidISODate(op.date) && monthKey(op.date) === ym);
   const ivaRet = ops.reduce((s, op) => s + opBreakdown(op).retIva, 0);
   const ganRet = ops.reduce((s, op) => s + opBreakdown(op).retGanancias, 0);
+  const retIIBB = ops.reduce((s, op) => s + opBreakdown(op).retIIBB, 0);
   const sircreb = (cobrado * p.sircrebPct) / 100;
   const cheque = (cobradoCheque * p.chequePct) / 100;
   const flujo = cobrado - sircreb - cheque - prov - gastos - impPagados;
-  return { ganancia, ivaDev, cobrado, sircreb, cheque, prov, gastos, retiros, impPagados, ivaRet, ganRet, flujo };
+  return { ganancia, ivaDev, cobrado, sircreb, cheque, prov, gastos, retiros, impPagados, ivaRet, ganRet, retIIBB, flujo };
+}
+
+// Fecha de vencimiento de un período: el día configurado del mes siguiente.
+function dueDate(period, day) {
+  return Number(day) > 0 ? `${String(Math.trunc(day)).padStart(2, "0")}/${shiftMonth(period, 1).slice(5)}` : "fecha a definir";
+}
+
+// Lo que hay que guardar, separado por mes de pago (no en una sola línea).
+function reserveItems() {
+  ensureTaxState();
+  const p = state.taxParams;
+  const months = monthsFromStart();
+  const cur = months[months.length - 1];
+  const ivaRows = typeof ivaPositionRows === "function" ? ivaPositionRows() : [];
+  const lastIva = ivaRows.length ? ivaRows[ivaRows.length - 1] : null;
+  const iva = [];
+  const iibb = [];
+  let saldo = lastIva ? Math.max(0, lastIva.pasa) : 0;
+  let cumResultado = Number(p.resultadoPrevio || 0);
+  let cumGanRet = 0;
+  months.forEach((ym) => {
+    const a = flowAgg(ym);
+    cumResultado += a.ganancia - monthCosts(ym) - autonomosFor(ym) - iibbDeterminadoFor(ym) - a.cheque;
+    cumGanRet += a.ganRet;
+    const pend = iibbPendienteFor(ym);
+    if (pend > 0) iibb.push({ period: ym, amount: pend, due: dueDate(ym, p.iibbDiaVence), partial: ym === cur });
+    if (lastIva && ym > lastIva.period) {
+      const net = a.ivaDev - a.ivaRet;
+      const toPay = Math.max(0, net - saldo);
+      saldo = Math.max(0, saldo - net);
+      iva.push({ period: ym, net, amount: toPay, band: Number(p.ivaBandPorMes || 0), due: dueDate(ym, p.ivaDiaVence), partial: ym === cur });
+    }
+  });
+  const autRec = taxRecord("AUTONOMOS", cur);
+  const aut = autRec && autRec.status === "pagado" ? 0 : autonomosFor(cur);
+  const ganancias = Math.max(0, (Math.max(0, cumResultado) * p.gananciasPct) / 100 - cumGanRet);
+  const proveedores = providerPayable().total;
+  const now = iva.reduce((s, x) => s + x.amount, 0) + iibb.reduce((s, x) => s + x.amount, 0) + aut + proveedores;
+  return { iva, iibb, aut, ganancias, proveedores, ivaKnown: Boolean(lastIva), lastIva, now, cur };
 }
 
 function renderFlowBlock() {
@@ -2442,50 +2483,152 @@ function renderFlowBlock() {
   const p = state.taxParams;
   const months = monthsFromStart();
   const cur = months[months.length - 1];
-  const ivaRows = typeof ivaPositionRows === "function" ? ivaPositionRows() : [];
-  const lastIva = ivaRows.length ? ivaRows[ivaRows.length - 1] : null;
-
-  let cum = 0, cumResultado = Number(p.resultadoPrevio || 0), cumGanRet = 0, iibbPend = 0, ivaNet = 0, ivaMonths = 0;
-  const flowHtml = [], devHtml = [];
+  const flowHtml = [];
+  const devHtml = [];
   months.forEach((ym) => {
     const a = flowAgg(ym);
-    const costos = monthCosts(ym), aut = autonomosFor(ym), iibb = iibbDeterminadoFor(ym);
+    const costos = monthCosts(ym);
+    const aut = autonomosFor(ym);
+    const iibb = iibbDeterminadoFor(ym);
     const resultado = a.ganancia - costos - aut - iibb - a.cheque;
     const gan = (Math.max(0, resultado) * p.gananciasPct) / 100;
-    cum += a.flujo - a.retiros;
-    cumResultado += resultado;
-    cumGanRet += a.ganRet;
-    iibbPend += iibbPendienteFor(ym);
-    if (lastIva && ym > lastIva.period) { ivaNet += a.ivaDev - a.ivaRet; ivaMonths += 1; }
-    flowHtml.push(`<tr><td>${ym}${ym === cur ? " (en curso)" : ""}</td><td class="num">${money(a.cobrado)}</td><td class="num">${money(a.sircreb)}</td><td class="num">${money(a.cheque)}</td><td class="num">${money(a.prov)}</td><td class="num">${money(a.gastos)}</td><td class="num">${money(a.impPagados)}</td><td class="num"><strong>${money(a.flujo)}</strong></td><td class="num">${money(a.retiros)}</td><td class="num">${money(cum)}</td></tr>`);
-    devHtml.push(`<tr><td>${ym}${ym === cur ? " (en curso)" : ""}</td><td class="num">${money(a.ganancia)}</td><td class="num">${money(costos)}</td><td class="num">${money(aut)}</td><td class="num">${money(iibb)}</td><td class="num">${money(a.cheque)}</td><td class="num">${money(resultado)}</td><td class="num">${money(gan)}</td><td class="num"><strong>${money(resultado - gan)}</strong></td></tr>`);
+    const label = `${ym}${ym === cur ? " (en curso)" : ""}`;
+    flowHtml.push(`<tr><td>${label}</td><td class="num">${money(a.cobrado)}</td><td class="num">${money(a.sircreb)}</td><td class="num">${money(a.cheque)}</td><td class="num">${money(a.prov)}</td><td class="num">${money(a.gastos)}</td><td class="num">${money(a.impPagados)}</td><td class="num"><strong>${money(a.flujo)}</strong></td></tr>`);
+    devHtml.push(`<tr><td>${label}</td><td class="num">${money(a.ganancia)}</td><td class="num">${money(costos)}</td><td class="num">${money(aut)}</td><td class="num">${money(iibb)}</td><td class="num">${money(a.cheque)}</td><td class="num">${money(resultado)}</td><td class="num">${money(gan)}</td><td class="num"><strong>${money(resultado - gan)}</strong></td></tr>`);
   });
+  $("#flowRows").innerHTML = `<tr><th>Mes</th><th class="num">Cobrado</th><th class="num">− SIRCREB (est.)</th><th class="num">− Imp. cheque (est.)</th><th class="num">− Pagado a prov.</th><th class="num">− Gastos</th><th class="num">− Impuestos pagados</th><th class="num">Flujo neto</th></tr>${flowHtml.join("")}`;
+  $("#devRows").innerHTML = `<tr><th>Mes</th><th class="num">Ganancia (remitos)</th><th class="num">− Gastos y honorarios</th><th class="num">− Autónomos</th><th class="num">− IIBB</th><th class="num">− Imp. cheque</th><th class="num">Resultado antes de Ganancias</th><th class="num">− Ganancias (est.)</th><th class="num">Le queda a Hojaldra</th></tr>${devHtml.join("")}`;
 
-  $("#flowRows").innerHTML = `<tr><th>Mes</th><th class="num">Cobrado</th><th class="num">− SIRCREB (est.)</th><th class="num">− Imp. cheque (est.)</th><th class="num">− Pagado a prov.</th><th class="num">− Gastos</th><th class="num">− Impuestos pagados</th><th class="num">Flujo neto</th><th class="num">Retiros del dueño</th><th class="num">Acumulado desde agosto</th></tr>${flowHtml.join("")}`;
-  $("#devRows").innerHTML = `<tr><th>Mes</th><th class="num">Ganancia (remitos)</th><th class="num">− Gastos y honorarios</th><th class="num">− Autónomos</th><th class="num">− IIBB</th><th class="num">− Imp. cheque</th><th class="num">Resultado antes de Ganancias</th><th class="num">− Ganancias (est.)</th><th class="num">Le queda a Pocho</th></tr>${devHtml.join("")}`;
-
+  const r = reserveItems();
+  const rows = [];
+  if (!r.ivaKnown) rows.push(`<tr><td>IVA</td><td class="num">Cargá las DDJJ de IVA</td></tr>`);
+  r.iva.forEach((x) => {
+    const covered = x.amount === 0 && x.net > 0 ? ` <span class="legend">(cubierto por el saldo a favor)</span>` : "";
+    rows.push(`<tr><td>IVA de ${escapeHtml(x.period)}${x.partial ? " (mes en curso, se va acumulando)" : ""}<br><span class="legend">se paga en ${escapeHtml(shiftMonth(x.period, 1))} · vence ${escapeHtml(x.due)}</span></td><td class="num">≈ ${money(x.amount)}${covered} <span class="legend">(± ${money(x.band)})</span></td></tr>`);
+  });
+  r.iibb.forEach((x) => {
+    rows.push(`<tr><td>IIBB de ${escapeHtml(x.period)}${x.partial ? " (mes en curso, se va acumulando)" : ""}<br><span class="legend">se paga en ${escapeHtml(shiftMonth(x.period, 1))} · vence ${escapeHtml(x.due)}</span></td><td class="num">≈ ${money(x.amount)}</td></tr>`);
+  });
+  rows.push(`<tr><td>Autónomos del mes en curso</td><td class="num">${money(r.aut)}</td></tr>`);
+  rows.push(`<tr><td>Proveedores (el cliente ya pagó)</td><td class="num">≈ ${money(r.proveedores)}</td></tr>`);
+  rows.push(`<tr class="totals-row"><th>Total para guardar ahora${r.ivaKnown ? "" : " (sin IVA)"}</th><th class="num">${money(r.now)}</th></tr>`);
+  rows.push(`<tr><td>Más adelante: Ganancias (acumulado − retenciones sufridas)</td><td class="num">≈ ${money(r.ganancias)}</td></tr>`);
+  $("#reserveRows").innerHTML = rows.join("");
   const band = Number(p.ivaBandPorMes || 0);
-  const ivaKnown = Boolean(lastIva);
-  const ivaRes = ivaKnown ? Math.max(0, ivaNet - Math.max(0, lastIva.pasa)) : 0;
-  const ivaBand = band * ivaMonths;
-  const ganRes = Math.max(0, (Math.max(0, cumResultado) * p.gananciasPct) / 100 - cumGanRet);
-  const autRec = taxRecord("AUTONOMOS", cur);
-  const autPend = autRec && autRec.status === "pagado" ? 0 : autonomosFor(cur);
-  const prov = providerPayable();
-  const reservas = ivaRes + iibbPend + autPend + ganRes + prov.total;
-  const disponible = cum - reservas;
-  $("#reserveRows").innerHTML = `
-    <tr><td>IVA a reservar${ivaKnown ? ` (desde ${escapeHtml(shiftMonth(lastIva.period, 1))})` : ""}</td><td class="num">${ivaKnown ? `≈ ${money(ivaRes)} <span class="legend">(± ${money(ivaBand)})</span>` : "Cargá las DDJJ de IVA"}</td></tr>
-    <tr><td>A pagar a proveedores (el cliente ya pagó)</td><td class="num">≈ ${money(prov.total)}</td></tr>
-    <tr><td>IIBB pendiente de pago</td><td class="num">≈ ${money(iibbPend)}</td></tr>
-    <tr><td>Autónomos del mes en curso</td><td class="num">${money(autPend)}</td></tr>
-    <tr><td>Ganancias a juntar (acumulado − retenciones sufridas)</td><td class="num">≈ ${money(ganRes)}</td></tr>
-    <tr class="totals-row"><th>Total reservas</th><th class="num">${money(reservas)}</th></tr>
-    <tr><td>Flujo acumulado desde agosto (después de retiros)</td><td class="num">${money(cum)}</td></tr>
-    <tr class="totals-row"><th>Disponible real${ivaKnown ? "" : " (sin IVA)"}</th><th class="num">${money(disponible)}</th></tr>`;
-  $("#reserveNote").innerHTML = ivaKnown
-    ? `IVA: se estima por remitos desde la última DDJJ cargada (${escapeHtml(lastIva.period)}), descontando las retenciones de IVA de las OPs y el saldo a favor que pasaba (${money(Math.max(0, lastIva.pasa))}). El margen de ± ${money(band)} por mes es lo que se desvió el estimado contra las DDJJ de agosto y septiembre. Cuando cargues la DDJJ real de un mes, reemplaza a la estimación.`
+  $("#reserveNote").innerHTML = r.ivaKnown
+    ? `IVA: se estima por remitos desde la última DDJJ cargada (${escapeHtml(r.lastIva.period)}), descontando las retenciones de IVA de las OPs y el saldo a favor, que se va usando mes a mes (${money(Math.max(0, r.lastIva.pasa))} al empezar). El margen de ± ${money(band)} por mes es lo que se desvió el estimado contra las DDJJ de agosto y septiembre. Cuando cargues la DDJJ real de un mes, reemplaza a la estimación.`
     : "Todavía no hay DDJJ de IVA cargadas en el panel de IVA, así que no puedo estimar cuánto reservar. Cargá agosto y septiembre y aparece solo.";
+}
+
+// Ganado (devengado) vs. cobrado (percibido), mes a mes y comparable: los dos sin IVA.
+function renderCompareTable() {
+  ensureTaxState();
+  if (!$("#compareRows")) return;
+  const months = monthsFromStart();
+  const cur = months[months.length - 1];
+  let cum = 0;
+  let totalG = 0;
+  let totalC = 0;
+  const rows = months.map((ym) => {
+    const a = flowAgg(ym);
+    const netCash = (a.cobrado - a.prov) / (1 + IVA_RATE);
+    const gap = a.ganancia - netCash;
+    cum += gap;
+    totalG += a.ganancia;
+    totalC += netCash;
+    return `<tr><td>${ym}${ym === cur ? " (en curso)" : ""}</td><td class="num">${money(a.ganancia)}</td><td class="num">${money(a.cobrado)}</td><td class="num">${money(a.prov)}</td><td class="num">${money(netCash)}</td><td class="num"><strong>${money(gap)}</strong></td><td class="num">${money(cum)}</td></tr>`;
+  });
+  $("#compareRows").innerHTML = `<tr><th>Mes</th><th class="num">Ganancia del mes (sin IVA)</th><th class="num">Cobrado</th><th class="num">Pagado a prov.</th><th class="num">Cobrado − pagado (sin IVA, aprox.)</th><th class="num">Ganado y todavía sin cobrar</th><th class="num">Acumulado sin cobrar</th></tr>${rows.join("")}<tr class="totals-row"><th>Total</th><th class="num">${money(totalG)}</th><th></th><th></th><th class="num">${money(totalC)}</th><th class="num">${money(totalG - totalC)}</th><th></th></tr>`;
+  if ($("#retRows")) {
+    $("#retRows").innerHTML = `<tr><th>Mes</th><th class="num">IVA retenido</th><th class="num">Ganancias retenida</th><th class="num">IIBB retenido</th></tr>` + months.map((ym) => {
+      const a = flowAgg(ym);
+      return `<tr><td>${ym}</td><td class="num">${money(a.ivaRet)}</td><td class="num">${money(a.ganRet)}</td><td class="num">${money(a.retIIBB)}</td></tr>`;
+    }).join("");
+  }
+}
+
+// ============ Resumen para vos y hoja imprimible para Pocho ============
+function monthResult(ym) {
+  const p = state.taxParams;
+  const a = flowAgg(ym);
+  const costos = monthCosts(ym);
+  const aut = autonomosFor(ym);
+  const iibb = iibbDeterminadoFor(ym);
+  const resultado = a.ganancia - costos - aut - iibb - a.cheque;
+  const gan = (Math.max(0, resultado) * p.gananciasPct) / 100;
+  return { ganancia: a.ganancia, costos, impuestos: aut + iibb + a.cheque + gan, resultado, gan, leQueda: resultado - gan };
+}
+
+// Importe legible: "$ 7,9 M", "$ 225 mil", "$ 0".
+function friendlyMoney(v) {
+  const n = Math.round(Number(v) || 0);
+  const abs = Math.abs(n);
+  const sign = n < 0 ? "-" : "";
+  if (abs >= 1000000) return `${sign}$ ${(abs / 1000000).toLocaleString("es-AR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} M`;
+  if (abs >= 1000) return `${sign}$ ${Math.round(abs / 1000).toLocaleString("es-AR")} mil`;
+  return `${sign}$ ${abs}`;
+}
+
+function monthLabel(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("es-AR", { month: "long", year: "numeric" });
+}
+
+function renderSummary() {
+  ensureTaxState();
+  if (!$("#summaryCards")) return; // index.html viejo
+  const months = monthsFromStart();
+  const cur = months[months.length - 1];
+  const closed = months.filter((m) => m < cur);
+  const last = closed.length ? closed[closed.length - 1] : null;
+  const lastRes = last ? monthResult(last) : null;
+  const r = reserveItems();
+  // Colchón: si el IVA da más de lo estimado, el próximo pago es el que más se nota.
+  const colchon = r.ivaKnown && r.iva.length ? r.iva[0].band : 0;
+  const total = r.now + colchon;
+
+  $("#summaryCards").innerHTML = `<div class="summary-card primary"><span>Para guardar ya</span><strong>${friendlyMoney(total)}</strong><small>Impuestos que vienen y proveedores ya cobrados, con un colchón de ${friendlyMoney(colchon)} por si el IVA da más.</small></div>`
+    + `<div class="summary-card"><span>Le quedó a Hojaldra · ${last ? escapeHtml(monthLabel(last)) : "—"}</span><strong>${lastRes ? friendlyMoney(lastRes.leQueda) : "—"}</strong><small>Después de impuestos, gastos y honorarios.</small></div>`;
+
+  const rows = [`<tr><th>Concepto</th><th class="num">Aprox.</th><th class="num">Puede llegar a</th><th>Vence</th></tr>`];
+  rows.push(`<tr><td>Proveedores (el cliente ya pagó)</td><td class="num">${money(r.proveedores)}</td><td class="num">—</td><td>a medida que facturan</td></tr>`);
+  if (!r.ivaKnown) rows.push(`<tr><td>IVA</td><td class="num" colspan="3">Cargá las DDJJ de IVA para estimarlo</td></tr>`);
+  r.iva.forEach((x) => rows.push(`<tr><td>IVA de ${escapeHtml(x.period)}${x.partial ? " (se va acumulando)" : ""}</td><td class="num">${money(x.amount)}</td><td class="num">${money(x.amount + x.band)}</td><td>${escapeHtml(x.due)}</td></tr>`));
+  r.iibb.forEach((x) => rows.push(`<tr><td>IIBB de ${escapeHtml(x.period)}${x.partial ? " (se va acumulando)" : ""}</td><td class="num">${money(x.amount)}</td><td class="num">—</td><td>${escapeHtml(x.due)}</td></tr>`));
+  if (r.aut > 0) rows.push(`<tr><td>Autónomos del mes</td><td class="num">${money(r.aut)}</td><td class="num">—</td><td>este mes</td></tr>`);
+  rows.push(`<tr class="totals-row"><th>Total para guardar ahora (con colchón)</th><th class="num">${money(total)}</th><th></th><th></th></tr>`);
+  rows.push(`<tr><td>Más adelante: Ganancias</td><td class="num">${money(r.ganancias)}</td><td class="num">—</td><td>2027</td></tr>`);
+  $("#summaryReserveRows").innerHTML = rows.join("");
+
+  $("#summaryMonthRows").innerHTML = `<tr><th>Mes</th><th class="num">Ganancia del negocio</th><th class="num">Impuestos</th><th class="num">Gastos y honorarios</th><th class="num">Le quedó a Hojaldra</th></tr>`
+    + (closed.length ? closed.map((ym) => {
+      const x = monthResult(ym);
+      return `<tr><td>${escapeHtml(monthLabel(ym))}</td><td class="num">${money(x.ganancia)}</td><td class="num">${money(x.impuestos)}</td><td class="num">${money(x.costos)}</td><td class="num"><strong>${money(x.leQueda)}</strong></td></tr>`;
+    }).join("") : `<tr><td class="empty" colspan="5">Todavía no hay un mes cerrado.</td></tr>`);
+
+  // Hoja para Pocho: lenguaje simple, importes redondeados, solo lo importante.
+  const prep = new Date().toLocaleDateString("es-AR");
+  const row = (title, sub, value) => `<div class="ps-row"><span>${title}${sub ? `<br><small>${sub}</small>` : ""}</span><strong>${value}</strong></div>`;
+  let guardar = row("Pago a proveedores", "Ya se lo cobramos a los clientes.", friendlyMoney(r.proveedores));
+  r.iva.filter((x) => x.amount > 0 || !x.partial).forEach((x) => {
+    guardar += row(`IVA de ${escapeHtml(monthLabel(x.period))}${x.partial ? " (hasta hoy)" : ""}`, `Se paga hasta el ${escapeHtml(x.due)}.`, friendlyMoney(x.amount));
+  });
+  r.iibb.forEach((x) => {
+    guardar += row(`Ingresos Brutos de ${escapeHtml(monthLabel(x.period))}${x.partial ? " (hasta hoy)" : ""}`, `Se paga hasta el ${escapeHtml(x.due)}.`, friendlyMoney(x.amount));
+  });
+  if (r.aut > 0) guardar += row("Autónomos de este mes", "", friendlyMoney(r.aut));
+  if (colchon > 0) guardar += row("Colchón por si el IVA da más", "Es un margen de seguridad.", friendlyMoney(colchon));
+  const quedo = closed.slice(-3).map((ym) => row(escapeHtml(monthLabel(ym)), "", friendlyMoney(monthResult(ym).leQueda))).join("");
+  $("#printSheet").innerHTML = `<h1>Tu plata · ${last ? escapeHtml(monthLabel(last)) : ""}</h1><p class="ps-sub">Hojaldra · preparado el ${escapeHtml(prep)}</p>`
+    + `<h2>Cuánto te quedó cada mes</h2>${quedo}<p class="ps-note">Es lo que ganó el negocio para vos, después de pagar impuestos, gastos y honorarios.</p>`
+    + `<h2>Lo que tenés que guardar (no es tuyo)</h2>${guardar}<div class="ps-row ps-total"><strong>Total para guardar ahora</strong><strong>${friendlyMoney(total)}</strong></div>`
+    + `<h2>Más adelante</h2>${row("Ganancias del año", "Se paga en 2027. Lo vamos juntando.", friendlyMoney(r.ganancias))}`
+    + `<div class="ps-box"><h2>¿Cuánto puedo gastar?</h2><p>Saldo del banco hoy: ______________ &nbsp;−&nbsp; Para guardar: <strong>${friendlyMoney(total)}</strong> &nbsp;=&nbsp; Podés gastar: ______________</p></div>`
+    + `<p class="ps-note">Son estimaciones. Cuando el contador confirme los impuestos, se actualizan.</p>`;
+}
+
+if ($("#printSummaryBtn")) {
+  $("#printSummaryBtn").addEventListener("click", () => { renderSummary(); window.print(); });
 }
 
 // ===================== Esquema de impuestos (Bloque 1) =====================
@@ -3016,11 +3159,13 @@ function renderMonthlyTable() {
   $("#monthlyRows").innerHTML += rowsHtml + totalsRow + warningRow;
 }
 
-$("#openingBalance").addEventListener("input", (event) => {
-  state.openingBalance = Number(event.target.value || 0);
-  saveState();
-  renderMonthlyTable();
-});
+if ($("#openingBalance")) {
+  $("#openingBalance").addEventListener("input", (event) => {
+    state.openingBalance = Number(event.target.value || 0);
+    saveState();
+    renderMonthlyTable();
+  });
+}
 
 /**
  * "Pendiente de pago" = remitos cuyo estado todavía no es PAGO — incluye

@@ -733,6 +733,7 @@ li {
 }
 
 @media (max-width: 980px) {
+  .summary-cards,
   .topbar,
   .toolbar,
   .kpis,
@@ -764,4 +765,114 @@ td details summary {
 
 td details[open] summary {
   margin-bottom: 4px;
+}
+
+/* Resumen */
+.summary-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.summary-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--surface);
+}
+
+.summary-card.primary {
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+
+.summary-card span {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.summary-card strong {
+  display: block;
+  font-size: 30px;
+  margin-top: 6px;
+}
+
+.summary-card small {
+  display: block;
+  margin-top: 4px;
+}
+
+/* Hoja imprimible para Pocho: oculta en pantalla, es lo único que sale al imprimir. */
+.print-only {
+  display: none;
+}
+
+#printSheet h1 {
+  font-size: 28px;
+}
+
+#printSheet h2 {
+  font-size: 18px;
+  color: #1d6b4f;
+  margin: 22px 0 6px;
+}
+
+.ps-sub,
+.ps-note {
+  color: #4a5750;
+  font-size: 13px;
+}
+
+.ps-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid #ccc;
+}
+
+.ps-row small {
+  color: #4a5750;
+  font-size: 13px;
+}
+
+.ps-row strong {
+  font-size: 20px;
+  white-space: nowrap;
+}
+
+.ps-total {
+  border-bottom: 2px solid #1d6b4f;
+}
+
+.ps-box {
+  margin-top: 22px;
+  padding: 14px 16px;
+  background: #eef3ef;
+  border-radius: 8px;
+}
+
+.ps-box h2 {
+  margin-top: 0;
+}
+
+@media print {
+  @page {
+    margin: 16mm;
+  }
+
+  body > *:not(#printSheet) {
+    display: none !important;
+  }
+
+  #printSheet {
+    display: block !important;
+    color: #000;
+    background: #fff;
+    font-size: 15px;
+  }
 }
